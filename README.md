@@ -14,6 +14,12 @@ Private and anonymous self-hosted messenger.
 - Platforms: Windows, Linux, macOS, Android
 - Anonymous accounts — no phone number or email required
 
+## Development
+
+ONYX is developed by a single developer with heavy use of AI-assisted coding tools.
+All architecture decisions, security implementation and code review are done by the author.
+
+
 ## Building
 
 Requires [Flutter](https://flutter.dev/) SDK.
