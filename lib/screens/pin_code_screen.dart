@@ -1,9 +1,11 @@
 // lib/screens/pin_code_screen.dart
 import 'dart:io';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show LogicalKeyboardKey, KeyDownEvent, KeyRepeatEvent;
 import '../managers/settings_manager.dart';
 import '../managers/decoy_manager.dart';
+import '../managers/fallback_storage.dart';
 
 bool get _isDesktop =>
     !const bool.fromEnvironment('dart.library.html') &&
@@ -156,6 +158,68 @@ class _PinCodeScreenState extends State<PinCodeScreen>
         }
       }
     } else {
+      final isDesktop = !kIsWeb &&
+          (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
+
+      if (isDesktop) {
+        // Ensure FallbackStorage knows its state before we check isLocked.
+        await FallbackStorage.main.initialize();
+
+        if (FallbackStorage.main.isLocked) {
+          // v3, locked at startup: PIN is the decryption key.
+          if (await FallbackStorage.main.unlockWithPin(_pin)) {
+            widget.onSuccess?.call();
+            return;
+          }
+          if (widget.onFakePin != null && await DecoyManager.isEnabled()) {
+            if (await FallbackStorage.decoy.unlockWithPin(_pin)) {
+              widget.onFakePin!();
+              return;
+            }
+          }
+          _shake();
+          setState(() { _pin = ''; _error = 'Incorrect PIN'; });
+          return;
+        }
+
+        if (FallbackStorage.main.isV3) {
+          // v3, already unlocked mid-session (account switch, disable PIN, etc.).
+          if (FallbackStorage.main.verifyPin(_pin)) {
+            widget.onSuccess?.call();
+            return;
+          }
+          if (widget.onFakePin != null && await DecoyManager.isEnabled()) {
+            if (FallbackStorage.decoy.verifyPin(_pin)) {
+              widget.onFakePin!();
+              return;
+            }
+          }
+          _shake();
+          setState(() { _pin = ''; _error = 'Incorrect PIN'; });
+          return;
+        }
+
+        // v2 mode: compare with stored PIN, then migrate to v3 on success.
+        final stored = await SettingsManager.getPin();
+        if (_pin == stored) {
+          await FallbackStorage.main.migrateToV3(_pin);
+          widget.onSuccess?.call();
+          return;
+        }
+        if (widget.onFakePin != null && await DecoyManager.isEnabled()) {
+          final fakeStored = await DecoyManager.getPin();
+          if (fakeStored != null && _pin == fakeStored) {
+            await FallbackStorage.decoy.createWithPin(_pin);
+            widget.onFakePin!();
+            return;
+          }
+        }
+        _shake();
+        setState(() { _pin = ''; _error = 'Incorrect PIN'; });
+        return;
+      }
+
+      // Mobile: unchanged flow (platform keychain handles security).
       final stored = await SettingsManager.getPin();
       if (_pin == stored) {
         widget.onSuccess?.call();
@@ -169,10 +233,7 @@ class _PinCodeScreenState extends State<PinCodeScreen>
         }
       }
       _shake();
-      setState(() {
-        _pin = '';
-        _error = 'Incorrect PIN';
-      });
+      setState(() { _pin = ''; _error = 'Incorrect PIN'; });
     }
   }
 

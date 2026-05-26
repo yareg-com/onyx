@@ -25,6 +25,7 @@ class ChatInputBar extends StatefulWidget {
     this.hintStyle,
     this.contentInsertionConfiguration,
     this.readOnly = false,
+    this.glassMode = false,
   });
 
   final TextEditingController controller;
@@ -56,6 +57,7 @@ class ChatInputBar extends StatefulWidget {
   final ContentInsertionConfiguration? contentInsertionConfiguration;
 
   final bool readOnly;
+  final bool glassMode;
 
   @override
   State<ChatInputBar> createState() => _ChatInputBarState();
@@ -113,17 +115,26 @@ class _ChatInputBarState extends State<ChatInputBar> {
         final duration = const Duration(milliseconds: 300);
         const curve = Curves.easeInOutCubic;
 
+        // In glass mode borderColor is Colors.transparent; withValues(alpha)
+        // would produce semi-transparent black (0x4D000000), causing visible
+        // black bars. Force transparent borders when glassMode is on.
         final borderSide = BorderSide(
-          color: widget.borderColor.withValues(alpha: 0.3),
+          color: widget.glassMode
+              ? Colors.transparent
+              : widget.borderColor.withValues(alpha: 0.3),
           width: 1,
           strokeAlign: BorderSide.strokeAlignInside,
         );
         final bgColor = widget.backgroundColor.withValues(alpha: widget.opacity);
 
-        return AnimatedPadding(
+        return TweenAnimationBuilder<double>(
+          tween: Tween<double>(begin: 0.98, end: isFocused ? 1.0 : 0.98),
           duration: duration,
           curve: curve,
-          padding: EdgeInsets.symmetric(horizontal: isFocused ? 0 : 6),
+          builder: (_, widthFactor, child) => FractionallySizedBox(
+            widthFactor: widget.glassMode ? 1.0 : widthFactor,
+            child: child,
+          ),
           child: IntrinsicHeight(
             child: AnimatedContainer(
               duration: duration,
@@ -165,7 +176,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
                       child: IconButton(
                         icon: Icon(
                           Icons.add,
-                          color: colorScheme.onSurface.withOpacity(0.7),
+                          color: colorScheme.onSurface.withValues(alpha: 0.7),
                           size: 24,
                         ),
                         onPressed: widget.readOnly ? null : widget.onAttachPressed,
@@ -182,7 +193,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
                   AnimatedContainer(
                     duration: duration,
                     curve: curve,
-                    width: isFocused ? 8 : 0,
+                    width: (!widget.glassMode && isFocused) ? 8 : 0,
                   ),
 
                   // Main Input Area
@@ -289,7 +300,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
                                         child: Icon(
                                           isRecording ? Icons.stop : Icons.mic,
                                           key: ValueKey(isRecording ? 'stop' : 'mic'),
-                                          color: isRecording ? colorScheme.error : colorScheme.onSurface.withOpacity(0.6),
+                                          color: isRecording ? colorScheme.error : colorScheme.onSurface.withValues(alpha: 0.6),
                                           size: 22,
                                         ),
                                       ),
@@ -303,7 +314,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
                                     IconButton(
                                       icon: Icon(
                                         widget.sendIcon ?? Icons.send,
-                                        color: hasText ? (widget.sendColor ?? colorScheme.primary) : colorScheme.onSurface.withOpacity(0.3),
+                                        color: hasText ? (widget.sendColor ?? colorScheme.primary) : colorScheme.onSurface.withValues(alpha: 0.3),
                                         size: 22,
                                       ),
                                       onPressed: (widget.readOnly || !hasText) ? null : widget.onSendPressed,

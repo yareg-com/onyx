@@ -480,13 +480,17 @@ class _VoiceMessagePlayerState extends State<VoiceMessagePlayer> {
           debugPrint('[VoiceWidget] Favorites local file: ${widget.filename}');
           final favFilename = widget.filename.substring(6);
           final appDocuments = await getApplicationDocumentsDirectory();
-          final favFile = File('${appDocuments.path}/voice_cache/$favFilename');
-          if (await favFile.exists()) {
-            return favFile;
-          } else {
-            _lastEnsureError = 'Favorites voice file not found locally';
-            return null;
+          final voiceCacheFile = File('${appDocuments.path}/voice_cache/$favFilename');
+          if (await voiceCacheFile.exists()) {
+            return voiceCacheFile;
           }
+          // AUDIOv1 files are saved to fav_media/, not voice_cache/
+          final favMediaFile = File('${appDocuments.path}/fav_media/$favFilename');
+          if (await favMediaFile.exists()) {
+            return favMediaFile;
+          }
+          _lastEnsureError = 'Favorites voice file not found locally';
+          return null;
         }
 
         final appSupport = await getApplicationDocumentsDirectory();

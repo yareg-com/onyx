@@ -1,4 +1,6 @@
 // lib/screens/group_chat_screen.dart
+import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
+import '../enums/liquid_glass_quality.dart';
 import 'package:ONYX/screens/forward_screen.dart';
 import 'package:ONYX/managers/settings_manager.dart';
 import '../l10n/app_localizations.dart';
@@ -6,7 +8,7 @@ import 'package:ONYX/screens/chats_tab.dart' show getPreviewText;
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'dart:async';
-import 'dart:ui' as ui;
+import '../widgets/chat_background_layer.dart';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:io';
@@ -21,6 +23,7 @@ import '../globals.dart';
 import '../models/group.dart';
 import '../managers/account_manager.dart';
 import '../widgets/message_bubble.dart';
+import '../widgets/chat_images_scope.dart';
 import '../widgets/avatar_widget.dart';
 import '../widgets/avatar_crop_screen.dart';
 import '../widgets/cached_remote_avatar.dart';
@@ -38,6 +41,7 @@ import '../widgets/pending_upload_card.dart';
 import '../widgets/chat_search_bar.dart';
 import '../widgets/animated_message_bubble.dart';
 import '../widgets/message_reaction_bar.dart';
+import '../widgets/swipeable_message_wrapper.dart';
 import '../widgets/media_picker_sheet.dart';
 import '../widgets/chat_input_bar.dart';
 import 'package:gallery_saver_plus/gallery_saver.dart';
@@ -127,6 +131,21 @@ class _GroupChatScreenState extends State<GroupChatScreen>
       })>((active: false, selected: {}));
   Map<String, Map<String, dynamic>> get _selectedGroupMessages =>
       _selectionNotifier.value.selected;
+  final GlobalKey _messageListViewportKey = GlobalKey();
+  final Map<String, GlobalKey> _messageItemKeys = {};
+  List<String> _dragSelectionOrder = const [];
+  Map<String, Map<String, dynamic>> _dragSelectionLookup = const {};
+  Map<String, int> _dragSelectionIndices = const {};
+  bool _isDragSelectingMessages = false;
+  String? _dragSelectionAnchorKey;
+  String? _dragSelectionCurrentKey;
+  Map<String, Map<String, dynamic>> _dragSelectionBase = const {};
+  Offset _lastDragPointerGlobal = Offset.zero;
+  Timer? _dragAutoScrollTimer;
+  static const Duration _messageLongPressDuration =
+      Duration(milliseconds: 375);
+  static const double _dragEdgeZone = 80.0;
+  static const double _dragMaxSpeed = 14.0;
 
   void _startReplyingToMessage(Map<String, dynamic> msg) {
     setState(() {
@@ -434,6 +453,140 @@ class _GroupChatScreenState extends State<GroupChatScreen>
       next[uniqueKey] = msg;
       _selectionNotifier.value = (active: true, selected: next);
     }
+  }
+
+  String _selectionKeyForGroupMessage(Map<String, dynamic> msg) {
+    final sender =
+        widget.group.isChannel ? widget.group.name : msg['sender']?.toString() ?? '?';
+    final content = msg['content']?.toString() ?? '';
+    return '${msg['timestamp']}_${sender}_${content.hashCode}';
+  }
+
+  GlobalKey _messageItemKey(String uniqueKey) =>
+      _messageItemKeys.putIfAbsent(uniqueKey, () => GlobalKey());
+
+  void _startGroupDragSelection(Map<String, dynamic> msg, String uniqueKey) {
+    final cur = _selectionNotifier.value;
+    final next = Map<String, Map<String, dynamic>>.from(cur.selected);
+    if (!cur.active) {
+      HapticFeedback.mediumImpact();
+    }
+    next[uniqueKey] = msg;
+    _selectionNotifier.value = (active: true, selected: next);
+    _dragSelectionBase = Map<String, Map<String, dynamic>>.from(cur.selected)
+      ..[uniqueKey] = msg;
+    _dragSelectionAnchorKey = uniqueKey;
+    _dragSelectionCurrentKey = uniqueKey;
+    _isDragSelectingMessages = true;
+    _selectGroupMessageRangeTo(uniqueKey);
+  }
+
+  void _updateGroupDragSelection(Offset globalPosition) {
+    if (!_isDragSelectingMessages) return;
+    _lastDragPointerGlobal = globalPosition;
+    final hoveredKey = _messageKeyAtGlobal(globalPosition);
+    if (hoveredKey != null && hoveredKey != _dragSelectionCurrentKey) {
+      _selectGroupMessageRangeTo(hoveredKey);
+    }
+    _updateDragAutoScroll();
+  }
+
+  void _endGroupDragSelection() {
+    _isDragSelectingMessages = false;
+    _dragSelectionAnchorKey = null;
+    _dragSelectionCurrentKey = null;
+    _dragSelectionBase = const {};
+    _stopDragAutoScroll();
+  }
+
+  void _selectGroupMessageRangeTo(String uniqueKey) {
+    final anchorKey = _dragSelectionAnchorKey;
+    if (anchorKey == null) return;
+    final start = _dragSelectionIndices[anchorKey];
+    final end = _dragSelectionIndices[uniqueKey];
+    if (start == null || end == null) return;
+    final from = min(start, end);
+    final to = max(start, end);
+    final next = Map<String, Map<String, dynamic>>.from(_dragSelectionBase);
+    for (int i = from; i <= to; i++) {
+      final key = _dragSelectionOrder[i];
+      final msg = _dragSelectionLookup[key];
+      if (msg != null) next[key] = msg;
+    }
+    _dragSelectionCurrentKey = uniqueKey;
+    _selectionNotifier.value = (active: true, selected: next);
+  }
+
+  String? _messageKeyAtGlobal(Offset globalPosition) {
+    for (final uniqueKey in _dragSelectionOrder) {
+      final context = _messageItemKeys[uniqueKey]?.currentContext;
+      if (context == null) continue;
+      final box = context.findRenderObject() as RenderBox?;
+      if (box == null || !box.hasSize) continue;
+      final local = box.globalToLocal(globalPosition);
+      if (local.dx >= 0 &&
+          local.dy >= 0 &&
+          local.dx <= box.size.width &&
+          local.dy <= box.size.height) {
+        return uniqueKey;
+      }
+    }
+    return null;
+  }
+
+  void _updateDragAutoScroll() {
+    final box =
+        _messageListViewportKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final local = box.globalToLocal(_lastDragPointerGlobal);
+    final height = box.size.height;
+    final nearTop = local.dy < _dragEdgeZone;
+    final nearBottom = local.dy > height - _dragEdgeZone;
+    if (nearTop || nearBottom) {
+      _dragAutoScrollTimer ??= Timer.periodic(
+        const Duration(milliseconds: 16),
+        (_) => _handleDragAutoScrollTick(),
+      );
+    } else {
+      _stopDragAutoScroll();
+    }
+  }
+
+  void _handleDragAutoScrollTick() {
+    if (!_isDragSelectingMessages || !_scroll.hasClients) {
+      _stopDragAutoScroll();
+      return;
+    }
+    final box =
+        _messageListViewportKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final local = box.globalToLocal(_lastDragPointerGlobal);
+    final height = box.size.height;
+    double speed = 0;
+    if (local.dy < _dragEdgeZone) {
+      final depth =
+          ((_dragEdgeZone - local.dy) / _dragEdgeZone).clamp(0.0, 1.0);
+      speed = depth * _dragMaxSpeed;
+    } else if (local.dy > height - _dragEdgeZone) {
+      final depth = ((local.dy - (height - _dragEdgeZone)) / _dragEdgeZone)
+          .clamp(0.0, 1.0);
+      speed = -(depth * _dragMaxSpeed);
+    } else {
+      _stopDragAutoScroll();
+      return;
+    }
+    final newOffset =
+        (_scroll.offset + speed).clamp(0.0, _scroll.position.maxScrollExtent);
+    _scroll.jumpTo(newOffset);
+    final hoveredKey = _messageKeyAtGlobal(_lastDragPointerGlobal);
+    if (hoveredKey != null && hoveredKey != _dragSelectionCurrentKey) {
+      _selectGroupMessageRangeTo(hoveredKey);
+    }
+  }
+
+  void _stopDragAutoScroll() {
+    _dragAutoScrollTimer?.cancel();
+    _dragAutoScrollTimer = null;
   }
 
   void _copySelectedGroupMessages() {
@@ -799,7 +952,7 @@ class _GroupChatScreenState extends State<GroupChatScreen>
     });
   }
 
-  List<ContextMenuButtonItem> _buildGroupDesktopMenuItems(
+  List<DesktopMenuItem> _buildGroupDesktopMenuItems(
       Map<String, dynamic> msg) {
     final content = msg['content']?.toString() ?? '';
     final rawSender = msg['sender']?.toString() ?? '';
@@ -843,12 +996,14 @@ class _GroupChatScreenState extends State<GroupChatScreen>
         content.startsWith('[cannot-decrypt');
     final l = AppLocalizations.of(context);
     return [
-      ContextMenuButtonItem(
+      DesktopMenuItem(
+        icon: Icons.reply_rounded,
         label: l.reply,
         onPressed: () => _startReplyingToMessage(msg),
       ),
-      ContextMenuButtonItem(
-        label: 'React',
+      DesktopMenuItem(
+        icon: Icons.add_reaction_outlined,
+        label: l.react,
         onPressed: () {
           final rMsgId = int.tryParse(msg['id']?.toString() ?? '');
           final reactionKey = 'gm_${msg['id']}';
@@ -858,20 +1013,23 @@ class _GroupChatScreenState extends State<GroupChatScreen>
         },
       ),
       if (isSaveable)
-        ContextMenuButtonItem(
-          label: 'Save',
+        DesktopMenuItem(
+          icon: Icons.save_alt_rounded,
+          label: l.save,
           onPressed: () => _saveMediaFromMessage(content),
         ),
       if (isImage || isProxyImage)
-        ContextMenuButtonItem(
-          label: 'Copy Image',
+        DesktopMenuItem(
+          icon: Icons.copy_all_rounded,
+          label: l.copyImage,
           onPressed: isImage
               ? () => copyMessageImageToClipboard(
                   content, (m) => rootScreenKey.currentState?.showSnack(m))
               : () => _copyGroupProxyImage(content),
         ),
       if (!isMedia)
-        ContextMenuButtonItem(
+        DesktopMenuItem(
+          icon: Icons.content_copy_rounded,
           label: l.copy,
           type: ContextMenuButtonType.copy,
           onPressed: () {
@@ -880,23 +1038,28 @@ class _GroupChatScreenState extends State<GroupChatScreen>
           },
         ),
       if (isMe && !isMedia && msgId != null)
-        ContextMenuButtonItem(
+        DesktopMenuItem(
+          icon: Icons.edit_rounded,
           label: l.edit,
           onPressed: () => _startEditingGroupMessage(msg),
         ),
-      ContextMenuButtonItem(
-        label: _isGroupMsgPinned(msg) ? 'Unpin' : 'Pin',
+      DesktopMenuItem(
+        icon: _isGroupMsgPinned(msg) ? Icons.push_pin_outlined : Icons.push_pin_rounded,
+        label: _isGroupMsgPinned(msg) ? l.unpin : l.pin,
         onPressed: () => _toggleGroupPin(msg),
       ),
       if (isMe && msgId != null)
-        ContextMenuButtonItem(
+        DesktopMenuItem(
+          icon: Icons.delete_outline_rounded,
           label: l.delete,
           type: ContextMenuButtonType.delete,
+          color: Colors.red.shade400,
           onPressed: () => _desktopDeleteGroupMessage(msg, msgId),
         ),
       if (isFile)
-        ContextMenuButtonItem(
-          label: 'Show in file system',
+        DesktopMenuItem(
+          icon: Icons.folder_open_rounded,
+          label: l.showInFileSystem,
           onPressed: () {
             String filename = '';
             try {
@@ -912,7 +1075,7 @@ class _GroupChatScreenState extends State<GroupChatScreen>
                 filename.isNotEmpty ? mediaFilePathRegistry[filename] : null;
             if (localPath == null) {
               rootScreenKey.currentState
-                  ?.showSnack('File not loaded yet — open it first');
+                  ?.showSnack(l.fileNotLoadedOpenFirst);
               return;
             }
             revealInFileSystem(localPath);
@@ -1037,8 +1200,7 @@ class _GroupChatScreenState extends State<GroupChatScreen>
               continue;
             }
             try {
-              final ok = await GallerySaver.saveImage(cached.file.path,
-                  albumName: 'ONYX');
+              final ok = await saveImageToGallery(cached.file.path);
               if (ok == true) {
                 saved++;
               } else {
@@ -1111,8 +1273,7 @@ class _GroupChatScreenState extends State<GroupChatScreen>
                 continue;
               }
               try {
-                final ok = await GallerySaver.saveImage(cached.file.path,
-                    albumName: 'ONYX');
+                final ok = await saveImageToGallery(cached.file.path);
                 if (ok == true) {
                   saved++;
                 } else {
@@ -1200,6 +1361,7 @@ class _GroupChatScreenState extends State<GroupChatScreen>
         final isImage = [
           '.jpg',
           '.jpeg',
+          '.jfif',
           '.png',
           '.gif',
           '.webp',
@@ -1209,8 +1371,7 @@ class _GroupChatScreenState extends State<GroupChatScreen>
         final isVideo =
             ['.mp4', '.mov', '.avi', '.webm', '.m4v', '.mkv'].contains(ext);
         if (isImage) {
-          final saved =
-              await GallerySaver.saveImage(file.path, albumName: 'ONYX');
+          final saved = await saveImageToGallery(file.path);
           rootScreenKey.currentState?.showSnack(
             saved == true ? 'Saved to gallery' : 'Failed to save to gallery',
           );
@@ -1387,6 +1548,7 @@ class _GroupChatScreenState extends State<GroupChatScreen>
     _localRouteObserver.unsubscribe(this);
     _textCtrl.dispose();
     _scroll.removeListener(_onScroll);
+    _stopDragAutoScroll();
     _scroll.dispose();
     _focusNode.dispose();
     rootScreenKey.currentState?.unsubscribeFromGroup(widget.group.id);
@@ -2064,20 +2226,8 @@ class _GroupChatScreenState extends State<GroupChatScreen>
     }
     if (paths == null || paths.isEmpty) return;
 
-    if (paths.length > 1 && paths.every(FileTypeDetector.isImage)) {
-      if (SettingsManager.confirmFileUpload.value) {
-        if (!mounted) return;
-        showDialog(
-          context: context,
-          builder: (_) => AlbumPreviewDialog(
-            filePaths: paths!,
-            onSend: () => _processAndUploadAlbum(paths!),
-            onCancel: () {},
-          ),
-        );
-        return;
-      }
-      await _processAndUploadAlbum(paths);
+    if (paths.length > 1) {
+      await _handleGroupDroppedFiles(paths);
       return;
     }
 
@@ -2185,18 +2335,17 @@ class _GroupChatScreenState extends State<GroupChatScreen>
 
   Future<void> _processAndUploadAlbum(List<String> filePaths) async {
     if (_isReadOnlyChannel) return;
-    final limited = filePaths.take(10).toList();
-    if (limited.isEmpty) return;
+    if (filePaths.isEmpty) return;
 
     const provider = MediaProvider.catbox;
     if (mounted) {
       rootScreenKey.currentState?.showSnack(
           AppLocalizations(SettingsManager.appLocale.value)
-              .uploadingImages(limited.length));
+              .uploadingImages(filePaths.length));
     }
 
     final items = <Map<String, String>>[];
-    for (final filePath in limited) {
+    for (final filePath in filePaths) {
       final basename = p.basename(filePath);
       final bytes = await File(filePath).readAsBytes();
       final link = await _uploadToProvider(bytes, basename, provider);
@@ -3344,14 +3493,28 @@ class _GroupChatScreenState extends State<GroupChatScreen>
                   ),
                 );
               },
-              child: ValueListenableBuilder<double>(
-                valueListenable: SettingsManager.elementBrightness,
-                builder: (_, brightness, ___) {
+              child: ListenableBuilder(
+                listenable: Listenable.merge([
+                  SettingsManager.elementBrightness,
+                  SettingsManager.liquidGlassOnInput,
+                  SettingsManager.liquidGlassInputQuality,
+                  SettingsManager.liquidGlassInputBlur,
+                  SettingsManager.liquidGlassInputTint,
+                  SettingsManager.liquidGlassInputSaturation,
+                  SettingsManager.liquidGlassInputChromatic,
+                  SettingsManager.liquidGlassInputRefractive,
+                  SettingsManager.liquidGlassInputLightIntensity,
+                  SettingsManager.liquidGlassInputThickness,
+                ]),
+                builder: (_, __) {
+                  final brightness = SettingsManager.elementBrightness.value;
                   final baseColor = SettingsManager.getElementColor(
                     colorScheme.surfaceContainerHighest,
                     brightness,
                   );
-                  return ChatInputBar(
+                  final isMobile = !Platform.isWindows && !Platform.isMacOS && !Platform.isLinux;
+                  final useGlass = isMobile && SettingsManager.liquidGlassOnInput.value;
+                  final bar = ChatInputBar(
                     controller: _textCtrl,
                     textFocusNode: _focusNode,
                     recordingListenable: recordingNotifier,
@@ -3370,10 +3533,12 @@ class _GroupChatScreenState extends State<GroupChatScreen>
                     onPaste: _handlePasteFromClipboard,
                     hintText:
                         AppLocalizations.of(context).localizeHint(_inputHint),
-                    backgroundColor: baseColor,
-                    opacity: opacity,
-                    borderColor:
-                        colorScheme.outlineVariant.withValues(alpha: 0.15),
+                    backgroundColor: useGlass ? Colors.white : baseColor,
+                    opacity: useGlass ? 0.0 : opacity,
+                    borderColor: useGlass
+                        ? Colors.transparent
+                        : colorScheme.outlineVariant.withValues(alpha: 0.15),
+                    glassMode: useGlass,
                     contentInsertionConfiguration:
                         ContentInsertionConfiguration(
                       allowedMimeTypes: const [
@@ -3410,6 +3575,44 @@ class _GroupChatScreenState extends State<GroupChatScreen>
                       },
                     ),
                     readOnly: _isReadOnlyChannel,
+                  );
+                  if (!useGlass) return bar;
+                  final quality = SettingsManager.liquidGlassInputQuality.value;
+                  final blur = SettingsManager.liquidGlassInputBlur.value;
+                  final tint = SettingsManager.liquidGlassInputTint.value;
+                  final saturation = SettingsManager.liquidGlassInputSaturation.value;
+                  final chromatic = SettingsManager.liquidGlassInputChromatic.value;
+                  final refractive = SettingsManager.liquidGlassInputRefractive.value;
+                  final lightIntensity = SettingsManager.liquidGlassInputLightIntensity.value;
+                  final thickness = SettingsManager.liquidGlassInputThickness.value;
+                  final glassQuality = switch (quality) {
+                    LiquidGlassQuality.fast    => GlassQuality.standard,
+                    LiquidGlassQuality.medium  => GlassQuality.minimal,
+                    LiquidGlassQuality.quality => GlassQuality.premium,
+                  };
+                  final isDark = Theme.of(context).brightness == Brightness.dark;
+                  final tintColor = isDark
+                      ? Colors.white.withValues(alpha: tint)
+                      : Colors.black.withValues(alpha: tint);
+                  final settings = LiquidGlassSettings(
+                    thickness: thickness,
+                    blur: blur,
+                    chromaticAberration: chromatic,
+                    lightIntensity: lightIntensity,
+                    refractiveIndex: refractive,
+                    saturation: saturation,
+                    ambientStrength: 0.8,
+                    lightAngle: 0.75 * pi,
+                    glassColor: tintColor,
+                  );
+                  return GlassCard(
+                    useOwnLayer: true,
+                    settings: settings,
+                    quality: glassQuality,
+                    padding: EdgeInsets.zero,
+                    shape: LiquidRoundedRectangle(borderRadius: 24),
+                    clipBehavior: Clip.antiAlias,
+                    child: bar,
                   );
                 },
               ),
@@ -3653,44 +3856,7 @@ class _GroupChatScreenState extends State<GroupChatScreen>
                 enabled: !_isReadOnlyChannel,
                 child: Stack(
                   children: [
-                    ValueListenableBuilder<String?>(
-                      valueListenable: SettingsManager.chatBackground,
-                      builder: (_, path, __) {
-                        if (path == null) return const SizedBox.shrink();
-                        final f = File(path);
-                        if (!f.existsSync()) return const SizedBox.shrink();
-                        return ValueListenableBuilder<bool>(
-                          valueListenable: SettingsManager.blurBackground,
-                          builder: (_, blur, __) {
-                            return ValueListenableBuilder<double>(
-                              valueListenable: SettingsManager.blurSigma,
-                              builder: (_, sigma, __) {
-                                final image = Image.file(f, fit: BoxFit.cover);
-                                return ValueListenableBuilder<bool>(
-                                  valueListenable: SettingsManager
-                                      .enablePerformanceOptimizations,
-                                  builder: (_, perfOptim, __) {
-                                    final child = (blur && !perfOptim)
-                                        ? ImageFiltered(
-                                            imageFilter: ui.ImageFilter.blur(
-                                                sigmaX: sigma, sigmaY: sigma),
-                                            child: image,
-                                          )
-                                        : image;
-                                    return Positioned.fill(
-                                      child: IgnorePointer(
-                                        child: Opacity(
-                                            opacity: 0.95, child: child),
-                                      ),
-                                    );
-                                  },
-                                );
-                              },
-                            );
-                          },
-                        );
-                      },
-                    ),
+                    const ChatBackgroundLayer(),
                     ValueListenableBuilder<bool>(
                       valueListenable: SettingsManager.showAvatarInChats,
                       builder: (_, showAvatar, __) {
@@ -3748,7 +3914,26 @@ class _GroupChatScreenState extends State<GroupChatScreen>
                                     });
                                   }
                                 }
-                                return Listener(
+                                final dragMessages = displayItems
+                                    .whereType<Map<String, dynamic>>()
+                                    .toList(growable: false);
+                                _dragSelectionOrder = dragMessages
+                                    .map(_selectionKeyForGroupMessage)
+                                    .toList(growable: false);
+                                _dragSelectionLookup = {
+                                  for (final msg in dragMessages)
+                                    _selectionKeyForGroupMessage(msg): msg,
+                                };
+                                _dragSelectionIndices = {
+                                  for (int idx = 0;
+                                      idx < _dragSelectionOrder.length;
+                                      idx++)
+                                    _dragSelectionOrder[idx]: idx,
+                                };
+                                return ChatImagesScope(
+                                  allImages: ChatImagesScope.computeFromGroupMessages(_messages),
+                                  child: Listener(
+                                  key: _messageListViewportKey,
                                   onPointerDown: (_) {
                                     if (!isDesktop) return;
                                     _suppressAutoRefocus = true;
@@ -3831,37 +4016,24 @@ class _GroupChatScreenState extends State<GroupChatScreen>
                                                     .size
                                                     .width *
                                                 0.7),
-                                        child: GestureDetector(
+                                        child: SwipeableMessageWrapper(
+                                          onSwipeRight: () =>
+                                              _onGroupLongPress(msg),
+                                          onSwipeLeft: () {
+                                            final preview = {
+                                              'id': msg['id']?.toString(),
+                                              'sender': rawSender,
+                                              'senderDisplayName': sender,
+                                              'content':
+                                                  getPreviewText(content),
+                                            };
+                                            _startReplyingToMessage(preview);
+                                          },
+                                          child: GestureDetector(
                                           onTapDown: (tap) {
                                             debugPrint(
                                                 '[group_chat_screen::msgTapDown] tapped message id=${msg['id']} replying=${_replyingToMessage != null} reply=${_replyingToMessage?.toString()}\n${StackTrace.current}');
                                           },
-                                          onHorizontalDragEnd: isDesktop
-                                              ? null
-                                              : (details) {
-                                                  final v =
-                                                      details.primaryVelocity;
-                                                  if (v != null && v > 300) {
-                                                    HapticFeedback
-                                                        .selectionClick();
-                                                    _onGroupLongPress(msg);
-                                                  } else if (v != null &&
-                                                      v < -300) {
-                                                    final preview = {
-                                                      'id':
-                                                          msg['id']?.toString(),
-                                                      'sender': rawSender,
-                                                      'senderDisplayName':
-                                                          sender,
-                                                      'content': getPreviewText(
-                                                          content),
-                                                    };
-                                                    _startReplyingToMessage(
-                                                        preview);
-                                                    HapticFeedback
-                                                        .selectionClick();
-                                                  }
-                                                },
                                           child: MessageBubble(
                                             key: ValueKey<String>(
                                                 'mb_${msg['timestamp']}_${sender}_${content.hashCode}'),
@@ -3913,6 +4085,7 @@ class _GroupChatScreenState extends State<GroupChatScreen>
                                                             .toString())
                                                 : null,
                                           ),
+                                        ),
                                         ),
                                       );
                                       final uniqueKey =
@@ -4136,7 +4309,9 @@ class _GroupChatScreenState extends State<GroupChatScreen>
                                               ),
                                             ),
                                           );
-                                          return RawGestureDetector(
+                                          return KeyedSubtree(
+                                            key: _messageItemKey(uniqueKey),
+                                            child: RawGestureDetector(
                                             behavior:
                                                 HitTestBehavior.translucent,
                                             gestures: {
@@ -4146,18 +4321,17 @@ class _GroupChatScreenState extends State<GroupChatScreen>
                                                 () =>
                                                     LongPressGestureRecognizer(
                                                         duration:
-                                                            const Duration(
-                                                                milliseconds:
-                                                                    250)),
+                                                            _messageLongPressDuration),
                                                 (instance) {
-                                                  instance.onLongPress = sel
-                                                          .active
-                                                      ? () =>
-                                                          _toggleGroupMsgSelection(
-                                                              msg, uniqueKey)
-                                                      : () =>
-                                                          _enterGroupSelectionMode(
-                                                              msg, uniqueKey);
+                                                  instance.onLongPressStart = (_) =>
+                                                      _startGroupDragSelection(
+                                                          msg, uniqueKey);
+                                                  instance.onLongPressMoveUpdate =
+                                                      (details) =>
+                                                          _updateGroupDragSelection(
+                                                              details.globalPosition);
+                                                  instance.onLongPressEnd = (_) =>
+                                                      _endGroupDragSelection();
                                                 },
                                               ),
                                             },
@@ -4224,11 +4398,13 @@ class _GroupChatScreenState extends State<GroupChatScreen>
                                                 ),
                                               ),
                                             ),
+                                          ),
                                           );
                                         },
                                       );
                                     },
                                   ),
+                                ),
                                 );
                               },
                             );
@@ -4268,52 +4444,91 @@ class _GroupChatScreenState extends State<GroupChatScreen>
                       right: 16,
                       child: Center(
                         child: _isReadOnlyChannel
-                            ? ValueListenableBuilder<double>(
-                                valueListenable: SettingsManager.elementOpacity,
-                                builder: (_, opacity, __) {
-                                  return ValueListenableBuilder<double>(
-                                    valueListenable:
-                                        SettingsManager.inputBarMaxWidth,
-                                    builder: (_, width, __) {
-                                      return ValueListenableBuilder<double>(
-                                        valueListenable:
-                                            SettingsManager.elementBrightness,
-                                        builder: (_, brightness, ___) {
-                                          final baseColor =
-                                              SettingsManager.getElementColor(
-                                            colorScheme.surfaceContainerHighest,
-                                            brightness,
-                                          );
-                                          return Container(
-                                            constraints:
-                                                BoxConstraints(maxWidth: width),
-                                            padding: const EdgeInsets.symmetric(
-                                                vertical: 12, horizontal: 16),
-                                            decoration: BoxDecoration(
-                                              color: baseColor.withValues(
-                                                  alpha: opacity),
-                                              borderRadius:
-                                                  BorderRadius.circular(28),
-                                              border: Border.all(
-                                                color: colorScheme
-                                                    .outlineVariant
-                                                    .withValues(alpha: 0.15),
-                                                width: 1,
-                                              ),
-                                            ),
-                                            child: Text(
-                                              'This is a channel. You cannot send messages here.',
-                                              style: TextStyle(
-                                                color: colorScheme.onSurface
-                                                    .withValues(alpha: 0.6),
-                                                fontSize: 14,
-                                              ),
-                                              textAlign: TextAlign.center,
-                                            ),
-                                          );
-                                        },
-                                      );
-                                    },
+                            ? ListenableBuilder(
+                                listenable: Listenable.merge([
+                                  SettingsManager.elementOpacity,
+                                  SettingsManager.inputBarMaxWidth,
+                                  SettingsManager.elementBrightness,
+                                  SettingsManager.liquidGlassOnInput,
+                                  SettingsManager.liquidGlassInputQuality,
+                                  SettingsManager.liquidGlassInputBlur,
+                                  SettingsManager.liquidGlassInputTint,
+                                  SettingsManager.liquidGlassInputSaturation,
+                                  SettingsManager.liquidGlassInputChromatic,
+                                  SettingsManager.liquidGlassInputRefractive,
+                                  SettingsManager.liquidGlassInputLightIntensity,
+                                  SettingsManager.liquidGlassInputThickness,
+                                ]),
+                                builder: (_, __) {
+                                  final opacity = SettingsManager.elementOpacity.value;
+                                  final width = SettingsManager.inputBarMaxWidth.value;
+                                  final brightness = SettingsManager.elementBrightness.value;
+                                  final isMobile = !Platform.isWindows && !Platform.isMacOS && !Platform.isLinux;
+                                  final useGlass = isMobile && SettingsManager.liquidGlassOnInput.value;
+                                  final baseColor = SettingsManager.getElementColor(
+                                    colorScheme.surfaceContainerHighest,
+                                    brightness,
+                                  );
+                                  final label = Container(
+                                    constraints: BoxConstraints(maxWidth: width),
+                                    padding: const EdgeInsets.symmetric(
+                                        vertical: 12, horizontal: 16),
+                                    decoration: useGlass ? null : BoxDecoration(
+                                      color: baseColor.withValues(alpha: opacity),
+                                      borderRadius: BorderRadius.circular(28),
+                                      border: Border.all(
+                                        color: colorScheme.outlineVariant
+                                            .withValues(alpha: 0.15),
+                                        width: 1,
+                                      ),
+                                    ),
+                                    child: Text(
+                                      'This is a channel. You cannot send messages here.',
+                                      style: TextStyle(
+                                        color: colorScheme.onSurface
+                                            .withValues(alpha: 0.6),
+                                        fontSize: 14,
+                                      ),
+                                      textAlign: TextAlign.center,
+                                    ),
+                                  );
+                                  if (!useGlass) return label;
+                                  final quality = SettingsManager.liquidGlassInputQuality.value;
+                                  final blur = SettingsManager.liquidGlassInputBlur.value;
+                                  final tint = SettingsManager.liquidGlassInputTint.value;
+                                  final saturation = SettingsManager.liquidGlassInputSaturation.value;
+                                  final chromatic = SettingsManager.liquidGlassInputChromatic.value;
+                                  final refractive = SettingsManager.liquidGlassInputRefractive.value;
+                                  final lightIntensity = SettingsManager.liquidGlassInputLightIntensity.value;
+                                  final thickness = SettingsManager.liquidGlassInputThickness.value;
+                                  final glassQuality = switch (quality) {
+                                    LiquidGlassQuality.fast    => GlassQuality.standard,
+                                    LiquidGlassQuality.medium  => GlassQuality.minimal,
+                                    LiquidGlassQuality.quality => GlassQuality.premium,
+                                  };
+                                  final isDark = Theme.of(context).brightness == Brightness.dark;
+                                  final tintColor = isDark
+                                      ? Colors.white.withValues(alpha: tint)
+                                      : Colors.black.withValues(alpha: tint);
+                                  final settings = LiquidGlassSettings(
+                                    thickness: thickness,
+                                    blur: blur,
+                                    chromaticAberration: chromatic,
+                                    lightIntensity: lightIntensity,
+                                    refractiveIndex: refractive,
+                                    saturation: saturation,
+                                    ambientStrength: 0.8,
+                                    lightAngle: 0.75 * pi,
+                                    glassColor: tintColor,
+                                  );
+                                  return GlassCard(
+                                    useOwnLayer: true,
+                                    settings: settings,
+                                    quality: glassQuality,
+                                    padding: EdgeInsets.zero,
+                                    shape: LiquidRoundedRectangle(borderRadius: 28),
+                                    clipBehavior: Clip.antiAlias,
+                                    child: label,
                                   );
                                 },
                               )
@@ -4411,27 +4626,58 @@ class _GroupChatScreenState extends State<GroupChatScreen>
     }
     if (existing.isEmpty) return;
 
-    if (existing.length > 1 && existing.every(FileTypeDetector.isImage)) {
-      if (SettingsManager.confirmFileUpload.value) {
-        if (!mounted) return;
-        showDialog(
-          context: context,
-          builder: (_) => AlbumPreviewDialog(
-            filePaths: existing,
-            onSend: () => _processAndUploadAlbum(existing),
-            onCancel: () {},
-          ),
-        );
-        return;
-      }
-      await _processAndUploadAlbum(existing);
-      return;
-    }
-
-    for (final filePath in existing) {
+    // Single file — preserve dialog/confirm behavior
+    if (existing.length == 1) {
+      final filePath = existing.first;
       final basename = p.basename(filePath);
       final ext = p.extension(basename).toLowerCase();
       _showGroupFilePreviewAndSend(filePath, basename, ext);
+      return;
+    }
+
+    // Multiple files — batch consecutive images (≤10 per album), send others individually.
+    // Each album batch shows its own confirmation dialog (one dialog per 10 images).
+    int i = 0;
+    while (i < existing.length) {
+      final fp = existing[i];
+      if (FileTypeDetector.isImage(fp)) {
+        final batch = <String>[];
+        while (i < existing.length &&
+            FileTypeDetector.isImage(existing[i]) &&
+            batch.length < 10) {
+          batch.add(existing[i]);
+          i++;
+        }
+        if (!mounted) return;
+        var proceed = false;
+        await showDialog<void>(
+          context: context,
+          builder: (_) => AlbumPreviewDialog(
+            filePaths: batch,
+            onSend: () => proceed = true,
+            onCancel: () {},
+          ),
+        );
+        if (!proceed) continue;
+        await _processAndUploadAlbum(batch);
+      } else {
+        if (!mounted) return;
+        final basename = p.basename(fp);
+        final ext = p.extension(basename).toLowerCase();
+        var proceed = false;
+        await showDialog<void>(
+          context: context,
+          builder: (_) => FilePreviewDialog(
+            filePath: fp,
+            onSend: () => proceed = true,
+            onCancel: () {},
+            onPasteExtra: null,
+            onSendAlbum: null,
+          ),
+        );
+        if (proceed) await _sendGroupFile(fp, basename, ext);
+        i++;
+      }
     }
   }
 

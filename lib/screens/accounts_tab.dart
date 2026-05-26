@@ -14,11 +14,13 @@ import '../managers/decoy_manager.dart';
 import 'decoy_setup_screen.dart' show DecoyAvatarPreview;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import '../widgets/auth_dialog.dart';
+import '../screens/device_auth_screen.dart';
 import '../globals.dart';
 import '../widgets/avatar_widget.dart';
 import '../utils/global_log_collector.dart';
 import '../l10n/app_localizations.dart';
 import 'package:http/http.dart' as http;
+import '../widgets/adaptive_glass_card.dart';
 
 class AccountsTab extends StatefulWidget {
   final String? currentUsername;
@@ -26,6 +28,12 @@ class AccountsTab extends StatefulWidget {
   final String? identityPubFp;
   final Future<bool> Function(String, String) onLogin;
   final Future<String?> Function(String, String) onRegister;
+  final Future<bool> Function({
+    required String username,
+    required String token,
+    required String uin,
+    required bool isPrimary,
+  }) onQrLogin;
   final Future<void> Function(String) onSwitchAccount;
   final Future<void> Function(String) onDeleteAccount;
   final List<String> logs;
@@ -38,6 +46,7 @@ class AccountsTab extends StatefulWidget {
     required this.identityPubFp,
     required this.onLogin,
     required this.onRegister,
+    required this.onQrLogin,
     required this.onSwitchAccount,
     required this.onDeleteAccount,
     required this.logs,
@@ -46,59 +55,6 @@ class AccountsTab extends StatefulWidget {
 
   @override
   State<AccountsTab> createState() => _AccountsTabState();
-}
-
-Widget _glassCard({required BuildContext context, required Widget child, VoidCallback? onTap}) {
-  final colorScheme = Theme.of(context).colorScheme;
-  return ValueListenableBuilder<double>(
-    valueListenable: SettingsManager.elementBrightness,
-    builder: (_, brightness, __) {
-      return ValueListenableBuilder<double>(
-        valueListenable: SettingsManager.elementOpacity,
-        builder: (_, opacity, __) {
-          final baseColor = SettingsManager.getElementColor(
-            colorScheme.surfaceContainerHighest,
-            brightness,
-          );
-          final border = Border.all(
-            color: colorScheme.outlineVariant.withValues(alpha: 0.15),
-            width: 1.0,
-          );
-          if (onTap != null) {
-            return ClipRRect(
-              borderRadius: BorderRadius.circular(20),
-              child: Material(
-                color: baseColor.withValues(alpha: opacity),
-                child: InkWell(
-                  onTap: onTap,
-                  child: Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(20),
-                      border: border,
-                    ),
-                    child: child,
-                  ),
-                ),
-              ),
-            );
-          }
-          return ClipRRect(
-            borderRadius: BorderRadius.circular(20),
-            child: Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: baseColor.withValues(alpha: opacity),
-                borderRadius: BorderRadius.circular(20),
-                border: border,
-              ),
-              child: child,
-            ),
-          );
-        },
-      );
-    },
-  );
 }
 
 class _AccountsTabState extends State<AccountsTab>
@@ -689,6 +645,7 @@ class _AccountsTabState extends State<AccountsTab>
                       pageBuilder: (ctx, anim1, anim2) => AuthDialog(
                         onLogin: widget.onLogin,
                         onRegister: widget.onRegister,
+                        onQrLogin: widget.onQrLogin,
                       ),
                     );
                     if (mounted) _loadTokenExpiry();
@@ -737,7 +694,7 @@ class _AccountsTabState extends State<AccountsTab>
 
   @override
   Widget build(BuildContext context) {
-    super.build(context); 
+    super.build(context);
     return FadeTransition(
       opacity: _isVisible ? _fadeAnimation : const AlwaysStoppedAnimation(0),
       child: ListView(
@@ -746,8 +703,9 @@ class _AccountsTabState extends State<AccountsTab>
         children: [
           
           if (widget.currentUsername != null)
-            _glassCard(
-              context: context,
+            AdaptiveGlassCard(
+              borderRadius: 20,
+              padding: const EdgeInsets.all(12),
               child: Row(
                 children: [
                   if (DecoyManager.isActive.value)
@@ -916,6 +874,7 @@ class _AccountsTabState extends State<AccountsTab>
 
           const SizedBox(height: 16),
 
+          // Add Account
           ValueListenableBuilder<double>(
             valueListenable: SettingsManager.elementBrightness,
             builder: (_, brightness, __) {
@@ -935,59 +894,119 @@ class _AccountsTabState extends State<AccountsTab>
                     ),
                   ),
                   child: FilledButton.icon(
-                onPressed: () async {
-                  if (isDesktop &&
-                      rootScreenKey.currentState?.selectedChatOther != null) {
-                    rootScreenKey.currentState?.hideDetailPanel();
-                  }
-
-                  await showGeneralDialog(
-                    context: context,
-                    barrierDismissible: true,
-                    barrierLabel: 'Authentication',
-                    transitionDuration: const Duration(milliseconds: 133),
-                    pageBuilder: (ctx, anim1, anim2) => AuthDialog(
-                      onLogin: widget.onLogin,
-                      onRegister: widget.onRegister,
+                    onPressed: () async {
+                      if (isDesktop &&
+                          rootScreenKey.currentState?.selectedChatOther != null) {
+                        rootScreenKey.currentState?.hideDetailPanel();
+                      }
+                      await showGeneralDialog(
+                        context: context,
+                        barrierDismissible: true,
+                        barrierLabel: 'Authentication',
+                        transitionDuration: const Duration(milliseconds: 133),
+                        pageBuilder: (ctx, anim1, anim2) => AuthDialog(
+                          onLogin: widget.onLogin,
+                          onRegister: widget.onRegister,
+                          onQrLogin: widget.onQrLogin,
+                        ),
+                      );
+                      if (mounted) {
+                        await AccountManager.ensureAccountsLoaded();
+                      }
+                    },
+                    icon: Icon(
+                      Icons.add,
+                      size: 18,
+                      color: (widget.currentTheme == AppTheme.grey &&
+                              Theme.of(context).colorScheme.brightness == Brightness.dark)
+                          ? const Color(0xFFA0A0A0)
+                          : Theme.of(context).colorScheme.primary,
                     ),
-                  );
-                  if (mounted) {
-                    
-                    await AccountManager.ensureAccountsLoaded();
-                  }
-                },
-                icon: Icon(
-                  Icons.add,
-                  size: 18,
-                  color: (widget.currentTheme == AppTheme.grey &&
-                          Theme.of(context).colorScheme.brightness == Brightness.dark)
-                      ? const Color(0xFFA0A0A0)
-                      : Theme.of(context).colorScheme.primary,
-                ),
-                label: Text(
-                  AppLocalizations.of(context).addAccount,
-                  style: TextStyle(
-                    fontSize: 15,
-                    color: (widget.currentTheme == AppTheme.grey &&
-                            Theme.of(context).colorScheme.brightness == Brightness.dark)
-                        ? const Color(0xFFA0A0A0)
-                        : Theme.of(context).colorScheme.primary,
+                    label: Text(
+                      AppLocalizations.of(context).addAccount,
+                      style: TextStyle(
+                        fontSize: 15,
+                        color: (widget.currentTheme == AppTheme.grey &&
+                                Theme.of(context).colorScheme.brightness == Brightness.dark)
+                            ? const Color(0xFFA0A0A0)
+                            : Theme.of(context).colorScheme.primary,
+                      ),
+                    ),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: widget.currentTheme == AppTheme.grey
+                          ? Theme.of(context).colorScheme.surface.withValues(alpha: 0.06)
+                          : Theme.of(context).colorScheme.primary.withValues(alpha: 0.12),
+                      foregroundColor: Theme.of(context).colorScheme.primary,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                      elevation: 0,
+                    ),
                   ),
                 ),
-                style: FilledButton.styleFrom(
-                  backgroundColor: widget.currentTheme == AppTheme.grey
-                      ? Theme.of(context).colorScheme.surface.withValues(alpha: 0.06)
-                      : Theme.of(context).colorScheme.primary.withValues(alpha: 0.12),
-                  foregroundColor: Theme.of(context).colorScheme.primary,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(
+              );
+            },
+          ),
+
+          const SizedBox(height: 16),
+
+          // Link Device — same secondary colour as Edit Profile
+          ValueListenableBuilder<double>(
+            valueListenable: SettingsManager.elementBrightness,
+            builder: (_, brightness, __) {
+              final baseColor = SettingsManager.getElementColor(
+                Theme.of(context).colorScheme.surfaceContainerHighest,
+                brightness,
+              );
+              return ClipRRect(
+                borderRadius: BorderRadius.circular(24),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: baseColor.withValues(alpha: 0.6),
                     borderRadius: BorderRadius.circular(24),
+                    border: Border.all(
+                      color: Theme.of(context).dividerColor.withValues(alpha: 0.15),
+                      width: 0.8,
+                    ),
                   ),
-                  elevation: 0,
+                  child: FilledButton.icon(
+                    onPressed: () => showDialog(
+                      context: context,
+                      barrierDismissible: true,
+                      builder: (_) => DeviceAuthScreen(
+                        currentUsername: widget.currentUsername,
+                        onQrLogin: widget.onQrLogin,
+                      ),
+                    ),
+                    icon: Icon(
+                      Icons.devices_rounded,
+                      size: 18,
+                      color: (widget.currentTheme == AppTheme.grey &&
+                              Theme.of(context).colorScheme.brightness == Brightness.dark)
+                          ? const Color(0xFFA0A0A0)
+                          : Theme.of(context).colorScheme.secondary,
+                    ),
+                    label: Text(
+                      AppLocalizations.of(context).deviceAuthTitle,
+                      style: TextStyle(
+                        fontSize: 15,
+                        color: (widget.currentTheme == AppTheme.grey &&
+                                Theme.of(context).colorScheme.brightness == Brightness.dark)
+                            ? const Color(0xFFA0A0A0)
+                            : Theme.of(context).colorScheme.secondary,
+                      ),
+                    ),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: widget.currentTheme == AppTheme.grey
+                          ? Theme.of(context).colorScheme.surface.withValues(alpha: 0.06)
+                          : Theme.of(context).colorScheme.secondary.withValues(alpha: 0.12),
+                      foregroundColor: Theme.of(context).colorScheme.secondary,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                      elevation: 0,
+                    ),
+                  ),
                 ),
-              ),
-            ),
-          );
+              );
             },
           ),
 
@@ -1089,8 +1108,9 @@ class _AccountsTabState extends State<AccountsTab>
                             ),
                           ),
                         ),
-                        child: _glassCard(
-                          context: context,
+                        child: AdaptiveGlassCard(
+                          borderRadius: 20,
+                          padding: const EdgeInsets.all(12),
                           onTap: () {
                             if (isDesktop) {
                               rootScreenKey.currentState?.hideDetailPanel();
@@ -1163,3 +1183,4 @@ class _AccountsTabState extends State<AccountsTab>
     );
   }
 }
+

@@ -1,5 +1,8 @@
 // lib/screens/favorites_screen.dart
+import 'dart:math' as math;
 import 'dart:convert';
+import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
+import '../enums/liquid_glass_quality.dart';
 
 import 'package:ONYX/screens/chats_tab.dart' show getPreviewText;
 import 'package:ONYX/screens/forward_screen.dart';
@@ -19,10 +22,11 @@ import 'package:file_picker/file_picker.dart';
 import '../globals.dart';
 import '../widgets/avatar_widget.dart';
 import '../widgets/avatar_crop_screen.dart';
-import '../widgets/adaptive_blur.dart';
+import '../widgets/chat_background_layer.dart';
 import '../models/chat_message.dart';
 import '../managers/settings_manager.dart';
 import '../widgets/message_bubble.dart';
+import '../widgets/chat_images_scope.dart';
 import '../models/favorite_chat.dart';
 import '../widgets/drag_drop_zone.dart';
 import '../widgets/file_preview_dialog.dart';
@@ -37,6 +41,7 @@ import '../widgets/pending_upload_card.dart';
 import '../widgets/chat_search_bar.dart';
 import '../widgets/animated_message_bubble.dart';
 import '../widgets/message_reaction_bar.dart';
+import '../widgets/swipeable_message_wrapper.dart';
 import '../widgets/media_picker_sheet.dart';
 import '../widgets/chat_input_bar.dart';
 
@@ -187,12 +192,26 @@ class _FavoritesScreenState extends State<FavoritesScreen>
   bool _hasInputAnimated = false;
 
   List<_ListItem>? _cachedDaySeparatorItems;
-  List<ChatMessage>? _lastProcessedMessages;
+  int _cachedDaySeparatorHash = 0;
 
   final List<UploadTask> _pendingUploads = [];
 
   late final _selectionNotifier = ValueNotifier<({bool active, Map<String, ChatMessage> selected})>((active: false, selected: {}));
   Map<String, ChatMessage> get _selectedFavMessages => _selectionNotifier.value.selected;
+  final GlobalKey _messageListViewportKey = GlobalKey();
+  final Map<String, GlobalKey> _messageItemKeys = {};
+  List<String> _dragSelectionOrder = const [];
+  Map<String, ChatMessage> _dragSelectionLookup = const {};
+  Map<String, int> _dragSelectionIndices = const {};
+  bool _isDragSelectingMessages = false;
+  String? _dragSelectionAnchorKey;
+  String? _dragSelectionCurrentKey;
+  Map<String, ChatMessage> _dragSelectionBase = const {};
+  Offset _lastDragPointerGlobal = Offset.zero;
+  Timer? _dragAutoScrollTimer;
+  static const Duration _messageLongPressDuration = Duration(milliseconds: 375);
+  static const double _dragEdgeZone = 80.0;
+  static const double _dragMaxSpeed = 14.0;
 
   // ── in-chat search ──────────────────────────────────────────────────────────
   bool _showSearch = false;
@@ -532,6 +551,136 @@ class _FavoritesScreenState extends State<FavoritesScreen>
     }
   }
 
+  String _selectionKeyForMessage(ChatMessage msg) =>
+      '${msg.id}_${msg.serverMessageId ?? 'local'}_${msg.time.millisecondsSinceEpoch}';
+
+  GlobalKey _messageItemKey(String uniqueKey) =>
+      _messageItemKeys.putIfAbsent(uniqueKey, () => GlobalKey());
+
+  void _startMessageDragSelection(ChatMessage msg, String uniqueKey) {
+    final cur = _selectionNotifier.value;
+    final next = Map<String, ChatMessage>.from(cur.selected);
+    if (!cur.active) {
+      HapticFeedback.mediumImpact();
+    }
+    next[uniqueKey] = msg;
+    _selectionNotifier.value = (active: true, selected: next);
+    _dragSelectionBase = Map<String, ChatMessage>.from(cur.selected)
+      ..[uniqueKey] = msg;
+    _dragSelectionAnchorKey = uniqueKey;
+    _dragSelectionCurrentKey = uniqueKey;
+    _isDragSelectingMessages = true;
+    _selectMessageRangeTo(uniqueKey);
+  }
+
+  void _updateMessageDragSelection(Offset globalPosition) {
+    if (!_isDragSelectingMessages) return;
+    _lastDragPointerGlobal = globalPosition;
+    final hoveredKey = _messageKeyAtGlobal(globalPosition);
+    if (hoveredKey != null && hoveredKey != _dragSelectionCurrentKey) {
+      _selectMessageRangeTo(hoveredKey);
+    }
+    _updateDragAutoScroll();
+  }
+
+  void _endMessageDragSelection() {
+    _isDragSelectingMessages = false;
+    _dragSelectionAnchorKey = null;
+    _dragSelectionCurrentKey = null;
+    _dragSelectionBase = const {};
+    _stopDragAutoScroll();
+  }
+
+  void _selectMessageRangeTo(String uniqueKey) {
+    final anchorKey = _dragSelectionAnchorKey;
+    if (anchorKey == null) return;
+    final start = _dragSelectionIndices[anchorKey];
+    final end = _dragSelectionIndices[uniqueKey];
+    if (start == null || end == null) return;
+    final from = math.min(start, end);
+    final to = math.max(start, end);
+    final next = Map<String, ChatMessage>.from(_dragSelectionBase);
+    for (int i = from; i <= to; i++) {
+      final key = _dragSelectionOrder[i];
+      final msg = _dragSelectionLookup[key];
+      if (msg != null) next[key] = msg;
+    }
+    _dragSelectionCurrentKey = uniqueKey;
+    _selectionNotifier.value = (active: true, selected: next);
+  }
+
+  String? _messageKeyAtGlobal(Offset globalPosition) {
+    for (final uniqueKey in _dragSelectionOrder) {
+      final context = _messageItemKeys[uniqueKey]?.currentContext;
+      if (context == null) continue;
+      final box = context.findRenderObject() as RenderBox?;
+      if (box == null || !box.hasSize) continue;
+      final local = box.globalToLocal(globalPosition);
+      if (local.dx >= 0 &&
+          local.dy >= 0 &&
+          local.dx <= box.size.width &&
+          local.dy <= box.size.height) {
+        return uniqueKey;
+      }
+    }
+    return null;
+  }
+
+  void _updateDragAutoScroll() {
+    final box =
+        _messageListViewportKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final local = box.globalToLocal(_lastDragPointerGlobal);
+    final height = box.size.height;
+    final nearTop = local.dy < _dragEdgeZone;
+    final nearBottom = local.dy > height - _dragEdgeZone;
+    if (nearTop || nearBottom) {
+      _dragAutoScrollTimer ??= Timer.periodic(
+        const Duration(milliseconds: 16),
+        (_) => _handleDragAutoScrollTick(),
+      );
+    } else {
+      _stopDragAutoScroll();
+    }
+  }
+
+  void _handleDragAutoScrollTick() {
+    if (!_isDragSelectingMessages || !_scroll.hasClients) {
+      _stopDragAutoScroll();
+      return;
+    }
+    final box =
+        _messageListViewportKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final local = box.globalToLocal(_lastDragPointerGlobal);
+    final height = box.size.height;
+    double speed = 0;
+    if (local.dy < _dragEdgeZone) {
+      final depth =
+          ((_dragEdgeZone - local.dy) / _dragEdgeZone).clamp(0.0, 1.0);
+      speed = depth * _dragMaxSpeed;
+    } else if (local.dy > height - _dragEdgeZone) {
+      final depth = ((local.dy - (height - _dragEdgeZone)) / _dragEdgeZone)
+          .clamp(0.0, 1.0);
+      speed = -(depth * _dragMaxSpeed);
+    } else {
+      _stopDragAutoScroll();
+      return;
+    }
+    final newOffset =
+        (_scroll.offset + speed).clamp(0.0, _scroll.position.maxScrollExtent);
+    _scroll.jumpTo(newOffset);
+    final hoveredKey = _messageKeyAtGlobal(_lastDragPointerGlobal);
+    if (hoveredKey != null && hoveredKey != _dragSelectionCurrentKey) {
+      _selectMessageRangeTo(hoveredKey);
+    }
+  }
+
+  void _stopDragAutoScroll() {
+    _dragAutoScrollTimer?.cancel();
+    _dragAutoScrollTimer = null;
+  }
+
   void _copySelectedFavMessages() {
     final texts = _selectedFavMessages.values
         .where((m) => _isFavTextMessage(m))
@@ -622,6 +771,7 @@ class _FavoritesScreenState extends State<FavoritesScreen>
     _searchStats.dispose();
     _searchFocusNode.dispose();
     _showScrollDownButton.dispose();
+    _stopDragAutoScroll();
     HardwareKeyboard.instance.removeHandler(_handleGlobalKey);
     super.dispose();
   }
@@ -760,6 +910,7 @@ class _FavoritesScreenState extends State<FavoritesScreen>
       root.chats.putIfAbsent(_chatId(), () => []).add(msg);
       root.persistChats();
       chatsVersion.value++;
+      root.bumpFavToTop(widget.favoriteId);
     }
     _textCtrl.clear();
 
@@ -814,15 +965,16 @@ class _FavoritesScreenState extends State<FavoritesScreen>
   Future<void> _handleDroppedFiles(List<String> filePaths) async {
     if (filePaths.isEmpty) return;
 
-    if (filePaths.length > 1 && filePaths.every(FileTypeDetector.isImage)) {
-      await _sendAlbum(filePaths);
-      return;
-    }
-
-    for (final filePath in filePaths) {
+    // Single file — preserve dialog/confirm behavior
+    if (filePaths.length == 1) {
+      final filePath = filePaths.first;
+      if (!await File(filePath).exists()) {
+        rootScreenKey.currentState?.showSnack(
+            AppLocalizations(SettingsManager.appLocale.value).fileNotFound);
+        return;
+      }
       final basename = p.basename(filePath);
       final ext = p.extension(basename).toLowerCase();
-
       String type;
       if (FileTypeDetector.isImage(filePath)) {
         type = 'IMAGE';
@@ -839,8 +991,69 @@ class _FavoritesScreenState extends State<FavoritesScreen>
       } else {
         type = 'FILE';
       }
-
       _showFilePreviewAndSend(filePath, basename, ext, type);
+      return;
+    }
+
+    // Multiple files — filter existing
+    final existing = <String>[];
+    for (final fp in filePaths) {
+      if (await File(fp).exists()) {
+        existing.add(fp);
+      } else {
+        rootScreenKey.currentState?.showSnack(
+            AppLocalizations(SettingsManager.appLocale.value).fileNotFound);
+      }
+    }
+    if (existing.isEmpty) return;
+
+    // Batch consecutive images (≤10 per album), one dialog per batch;
+    // non-image files sent individually without dialog
+    int i = 0;
+    while (i < existing.length) {
+      final fp = existing[i];
+      if (FileTypeDetector.isImage(fp)) {
+        final batch = <String>[];
+        while (i < existing.length &&
+            FileTypeDetector.isImage(existing[i]) &&
+            batch.length < 10) {
+          batch.add(existing[i]);
+          i++;
+        }
+        await _sendAlbum(batch);
+      } else if (FileTypeDetector.isVideo(fp) &&
+          SettingsManager.confirmFileUpload.value) {
+        if (!mounted) return;
+        final basename = p.basename(fp);
+        final ext = p.extension(basename).toLowerCase();
+        var proceed = false;
+        await showDialog<void>(
+          context: context,
+          builder: (_) => FilePreviewDialog(
+            filePath: fp,
+            onSend: () => proceed = true,
+            onCancel: () {},
+            onPasteExtra: null,
+            onSendAlbum: null,
+          ),
+        );
+        if (proceed) await _sendFile(fp, basename, ext, 'VIDEO');
+        i++;
+      } else {
+        final basename = p.basename(fp);
+        final ext = p.extension(basename).toLowerCase();
+        final type = FileTypeDetector.isAudio(fp)
+            ? 'AUDIO'
+            : FileTypeDetector.isDocument(fp)
+                ? 'DOCUMENT'
+                : FileTypeDetector.isCompress(fp)
+                    ? 'ARCHIVE'
+                    : FileTypeDetector.isData(fp)
+                        ? 'DATA'
+                        : 'FILE';
+        await _sendFile(fp, basename, ext, type);
+        i++;
+      }
     }
   }
 
@@ -1056,6 +1269,7 @@ class _FavoritesScreenState extends State<FavoritesScreen>
         root.chats.putIfAbsent(_chatId(), () => []).add(msg);
         root.persistChats();
         chatsVersion.value++;
+        root.bumpFavToTop(widget.favoriteId);
         root.showSnack(
             ' ${type.toLowerCase().replaceFirst(type[0], type[0].toUpperCase())} added');
       }
@@ -1067,8 +1281,7 @@ class _FavoritesScreenState extends State<FavoritesScreen>
   }
 
   Future<void> _sendAlbum(List<String> filePaths, {bool skipConfirm = false}) async {
-    final limited = filePaths.take(10).toList();
-    if (limited.isEmpty) return;
+    if (filePaths.isEmpty) return;
 
     if (!skipConfirm && SettingsManager.confirmFileUpload.value) {
       if (!mounted) return;
@@ -1076,7 +1289,7 @@ class _FavoritesScreenState extends State<FavoritesScreen>
       await showDialog<void>(
         context: context,
         builder: (_) => AlbumPreviewDialog(
-          filePaths: limited,
+          filePaths: filePaths,
           onSend: () => proceed = true,
           onCancel: () {},
         ),
@@ -1090,7 +1303,7 @@ class _FavoritesScreenState extends State<FavoritesScreen>
       await cacheDir.create(recursive: true);
 
       final albumItems = <Map<String, String>>[];
-      for (final filePath in limited) {
+      for (final filePath in filePaths) {
         final basename = p.basename(filePath);
         final cachePath = '${cacheDir.path}/$basename';
         await File(filePath).copy(cachePath);
@@ -1118,6 +1331,7 @@ class _FavoritesScreenState extends State<FavoritesScreen>
         root.chats.putIfAbsent(_chatId(), () => []).add(msg);
         root.persistChats();
         chatsVersion.value++;
+        root.bumpFavToTop(widget.favoriteId);
         root.showSnack('Album saved (${albumItems.length} images)');
       }
     } catch (e) {
@@ -1281,7 +1495,7 @@ class _FavoritesScreenState extends State<FavoritesScreen>
     });
   }
 
-  List<ContextMenuButtonItem>? _buildDesktopMenuItems(ChatMessage msg) {
+  List<DesktopMenuItem>? _buildDesktopMenuItems(ChatMessage msg) {
     if (!isDesktop) return null;
     final text = msg.content;
     final isImage = text.startsWith('IMAGEv1:');
@@ -1291,9 +1505,11 @@ class _FavoritesScreenState extends State<FavoritesScreen>
     final isFile = text.startsWith('FILEv1:') || text.startsWith('FILE:');
     final isSaveable = isImage || isAlbum || isVideo || isVoice || isFile;
     final isMedia = isSaveable || text.startsWith('[cannot-decrypt');
+    final l = AppLocalizations.of(context);
     return [
-      ContextMenuButtonItem(
-        label: 'Reply',
+      DesktopMenuItem(
+        icon: Icons.reply_rounded,
+        label: l.reply,
         onPressed: () => _startReplyingToMessage({
           'id': msg.id,
           'sender': msg.from,
@@ -1301,8 +1517,9 @@ class _FavoritesScreenState extends State<FavoritesScreen>
           'content': msg.content,
         }),
       ),
-      ContextMenuButtonItem(
-        label: 'React',
+      DesktopMenuItem(
+        icon: Icons.add_reaction_outlined,
+        label: l.react,
         onPressed: () {
           final favKey =
               '${msg.id}_${msg.serverMessageId ?? 'local'}_${msg.time.millisecondsSinceEpoch}';
@@ -1312,37 +1529,44 @@ class _FavoritesScreenState extends State<FavoritesScreen>
           });
         },
       ),
-      ContextMenuButtonItem(
-        label: _isFavMsgPinned(msg) ? 'Unpin' : 'Pin',
+      DesktopMenuItem(
+        icon: _isFavMsgPinned(msg) ? Icons.push_pin_outlined : Icons.push_pin_rounded,
+        label: _isFavMsgPinned(msg) ? l.unpin : l.pin,
         onPressed: () => _toggleFavPin(msg),
       ),
       if (isSaveable)
-        ContextMenuButtonItem(
-          label: 'Save',
+        DesktopMenuItem(
+          icon: Icons.save_alt_rounded,
+          label: l.save,
           onPressed: () => _saveMediaFromMessage(text),
         ),
       if (isImage)
-        ContextMenuButtonItem(
-          label: 'Copy Image',
+        DesktopMenuItem(
+          icon: Icons.copy_all_rounded,
+          label: l.copyImage,
           onPressed: () => copyMessageImageToClipboard(text, (m) => rootScreenKey.currentState?.showSnack(m)),
         ),
       if (!isMedia)
-        ContextMenuButtonItem(
-          label: 'Copy',
+        DesktopMenuItem(
+          icon: Icons.content_copy_rounded,
+          label: l.copy,
           type: ContextMenuButtonType.copy,
           onPressed: () {
             Clipboard.setData(ClipboardData(text: text));
-            rootScreenKey.currentState?.showSnack('Copied');
+            rootScreenKey.currentState?.showSnack(l.copied);
           },
         ),
       if (!isMedia)
-        ContextMenuButtonItem(
-          label: 'Edit',
+        DesktopMenuItem(
+          icon: Icons.edit_rounded,
+          label: l.edit,
           onPressed: () => _startEditingMessage(msg),
         ),
-      ContextMenuButtonItem(
-        label: 'Delete',
+      DesktopMenuItem(
+        icon: Icons.delete_outline_rounded,
+        label: l.delete,
         type: ContextMenuButtonType.delete,
+        color: Colors.red.shade400,
         onPressed: () => _desktopDeleteFavorite(msg),
       ),
     ];
@@ -1410,7 +1634,7 @@ class _FavoritesScreenState extends State<FavoritesScreen>
             final cached = imageFileCache[filename];
             if (cached == null) { failed++; continue; }
             try {
-              final ok = await GallerySaver.saveImage(cached.file.path, albumName: 'ONYX');
+              final ok = await saveImageToGallery(cached.file.path);
               if (ok == true) saved++; else failed++;
             } catch (_) { failed++; }
           }
@@ -1441,10 +1665,10 @@ class _FavoritesScreenState extends State<FavoritesScreen>
     try {
       if (Platform.isAndroid || Platform.isIOS) {
         final ext = p.extension(originalName).toLowerCase();
-        final isImage = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.heic'].contains(ext);
+        final isImage = ['.jpg', '.jpeg', '.jfif', '.png', '.gif', '.webp', '.bmp', '.heic'].contains(ext);
         final isVideo = ['.mp4', '.mov', '.avi', '.webm', '.m4v', '.mkv'].contains(ext);
         if (isImage) {
-          final saved = await GallerySaver.saveImage(file.path, albumName: 'ONYX');
+          final saved = await saveImageToGallery(file.path);
           rootScreenKey.currentState?.showSnack(saved == true ? 'Saved to gallery' : 'Failed to save to gallery');
         } else if (isVideo) {
           final saved = await GallerySaver.saveVideo(file.path, albumName: 'ONYX');
@@ -1509,9 +1733,12 @@ class _FavoritesScreenState extends State<FavoritesScreen>
   List<_ListItem> _buildMessagesWithDaySeparators(List<ChatMessage> msgs) {
     if (msgs.isEmpty) return [];
 
+    final currentHash = msgs.length.hashCode ^
+        (msgs.isNotEmpty ? msgs.last.id.hashCode : 0) ^
+        (msgs.isNotEmpty ? msgs.last.content.hashCode : 0);
+
     if (_cachedDaySeparatorItems != null &&
-        _lastProcessedMessages != null &&
-        identical(msgs, _lastProcessedMessages)) {
+        _cachedDaySeparatorHash == currentHash) {
       return _cachedDaySeparatorItems!;
     }
 
@@ -1530,14 +1757,14 @@ class _FavoritesScreenState extends State<FavoritesScreen>
     final result = items.reversed.toList();
 
     _cachedDaySeparatorItems = result;
-    _lastProcessedMessages = msgs;
+    _cachedDaySeparatorHash = currentHash;
 
     return result;
   }
 
   void _invalidateDaySeparatorCache() {
     _cachedDaySeparatorItems = null;
-    _lastProcessedMessages = null;
+    _cachedDaySeparatorHash = 0;
   }
 
   Widget _buildDaySeparator(BuildContext context, DateTime date) {
@@ -2012,36 +2239,7 @@ class _FavoritesScreenState extends State<FavoritesScreen>
         onFilesDropped: _handleDroppedFiles,
         child: Stack(
           children: [
-            ValueListenableBuilder<String?>(
-              valueListenable: SettingsManager.chatBackground,
-              builder: (_, path, __) {
-                if (path == null) return const SizedBox.shrink();
-                final f = File(path);
-                if (!f.existsSync()) return const SizedBox.shrink();
-                return ValueListenableBuilder<bool>(
-                  valueListenable: SettingsManager.blurBackground,
-                  builder: (_, blur, __) {
-                    final provider = FileImage(f);
-                    return ValueListenableBuilder<double>(
-                      valueListenable: SettingsManager.blurSigma,
-                      builder: (_, sigma, __) {
-                        final child = blur
-                            ? AdaptiveBlur(
-                                imageProvider: provider,
-                                sigma: sigma,
-                                fit: BoxFit.cover)
-                            : Image(image: provider, fit: BoxFit.cover);
-                        return Positioned.fill(
-                          child: IgnorePointer(
-                            child: Opacity(opacity: 0.95, child: child),
-                          ),
-                        );
-                      },
-                    );
-                  },
-                );
-              },
-            ),
+            const ChatBackgroundLayer(),
             ValueListenableBuilder<int>(
               valueListenable: chatsVersion,
               builder: (_, __, ___) {
@@ -2049,12 +2247,12 @@ class _FavoritesScreenState extends State<FavoritesScreen>
                 if (rootState == null) return const SizedBox();
                 final msgs = rootState.chats[_chatId()] ?? [];
 
-                _invalidateDaySeparatorCache();
-
                 if (msgs.isEmpty) {
                   return const Center(child: Text('No messages yet'));
                 }
-                return ValueListenableBuilder<bool>(
+                return ChatImagesScope(
+                  allImages: ChatImagesScope.computeFromChatMessages(msgs),
+                  child: ValueListenableBuilder<bool>(
                   valueListenable: SettingsManager.showAvatarInChats,
                   builder: (_, showAvatar, __) {
                     return ValueListenableBuilder<bool>(
@@ -2093,8 +2291,23 @@ class _FavoritesScreenState extends State<FavoritesScreen>
                                 });
                               }
                             }
+                            final dragMessages = items
+                                .whereType<_MessageItem>()
+                                .map((item) => item.message)
+                                .toList(growable: false);
+                            _dragSelectionOrder = dragMessages
+                                .map(_selectionKeyForMessage)
+                                .toList(growable: false);
+                            _dragSelectionLookup = {
+                              for (final msg in dragMessages) _selectionKeyForMessage(msg): msg,
+                            };
+                            _dragSelectionIndices = {
+                              for (int idx = 0; idx < _dragSelectionOrder.length; idx++)
+                                _dragSelectionOrder[idx]: idx,
+                            };
 
                             return Listener(
+                              key: _messageListViewportKey,
                               onPointerDown: (_) {
                                 if (!isDesktop) return;
                                 _suppressAutoRefocus = true;
@@ -2180,15 +2393,27 @@ class _FavoritesScreenState extends State<FavoritesScreen>
                                       child: expensiveChild,
                                       builder: (_, sel, bubbleChild) {
                                         final isSelected = sel.selected.containsKey(uniqueKey);
-                                        return RawGestureDetector(
+                                        return KeyedSubtree(
+                                          key: _messageItemKey(uniqueKey),
+                                          child: RawGestureDetector(
                                           behavior: HitTestBehavior.translucent,
                                           gestures: {
-                                            LongPressGestureRecognizer: GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(
-                                              () => LongPressGestureRecognizer(duration: const Duration(milliseconds: 250)),
+                                            LongPressGestureRecognizer:
+                                                GestureRecognizerFactoryWithHandlers<
+                                                    LongPressGestureRecognizer>(
+                                              () => LongPressGestureRecognizer(
+                                                  duration:
+                                                      _messageLongPressDuration),
                                               (instance) {
-                                                instance.onLongPress = sel.active
-                                                    ? () => _toggleFavMessageSelection(msg, uniqueKey)
-                                                    : () => _enterFavSelectionMode(msg, uniqueKey);
+                                                instance.onLongPressStart = (_) =>
+                                                    _startMessageDragSelection(
+                                                        msg, uniqueKey);
+                                                instance.onLongPressMoveUpdate =
+                                                    (details) =>
+                                                        _updateMessageDragSelection(
+                                                            details.globalPosition);
+                                                instance.onLongPressEnd = (_) =>
+                                                    _endMessageDragSelection();
                                               },
                                             ),
                                           },
@@ -2243,26 +2468,19 @@ class _FavoritesScreenState extends State<FavoritesScreen>
                                                         : null,
                                                   ),
                                                 Flexible(
-                                                  child: GestureDetector(
-                                                    onHorizontalDragEnd: isDesktop || sel.active
-                                                        ? null
-                                                        : (details) {
-                                                            final v = details.primaryVelocity;
-                                                            if (v != null && v > 300) {
-                                                              HapticFeedback.selectionClick();
-                                                              _onLongPress(msg);
-                                                            } else if (v != null && v < -300) {
-                                                              final preview = {
-                                                                'id': msg.serverMessageId,
-                                                                'localId': msg.id,
-                                                                'sender': msg.from,
-                                                                'senderDisplayName': msg.from,
-                                                                'content': getPreviewText(msg.content),
-                                                              };
-                                                              _startReplyingToMessage(preview);
-                                                              HapticFeedback.selectionClick();
-                                                            }
-                                                          },
+                                                  child: SwipeableMessageWrapper(
+                                                    disabled: sel.active,
+                                                    onSwipeRight: () => _onLongPress(msg),
+                                                    onSwipeLeft: () {
+                                                      final preview = {
+                                                        'id': msg.serverMessageId,
+                                                        'localId': msg.id,
+                                                        'sender': msg.from,
+                                                        'senderDisplayName': msg.from,
+                                                        'content': getPreviewText(msg.content),
+                                                      };
+                                                      _startReplyingToMessage(preview);
+                                                    },
                                                     child: Column(
                                                       crossAxisAlignment: swapped
                                                           ? CrossAxisAlignment.start
@@ -2294,6 +2512,7 @@ class _FavoritesScreenState extends State<FavoritesScreen>
                                             ),
                                           ),
                                         ),
+                                        ),
                                         );
                                       },
                                     );
@@ -2305,6 +2524,7 @@ class _FavoritesScreenState extends State<FavoritesScreen>
                     },
                   );
                 },
+              ),
               );
               },
             ),
@@ -2523,14 +2743,28 @@ class _FavoritesScreenState extends State<FavoritesScreen>
                                   ),
                                 );
                               },
-                              child: ValueListenableBuilder<double>(
-                                valueListenable: SettingsManager.elementBrightness,
-                                builder: (_, brightness, ___) {
+                              child: ListenableBuilder(
+                                listenable: Listenable.merge([
+                                  SettingsManager.elementBrightness,
+                                  SettingsManager.liquidGlassOnInput,
+                                  SettingsManager.liquidGlassInputQuality,
+                                  SettingsManager.liquidGlassInputBlur,
+                                  SettingsManager.liquidGlassInputTint,
+                                  SettingsManager.liquidGlassInputSaturation,
+                                  SettingsManager.liquidGlassInputChromatic,
+                                  SettingsManager.liquidGlassInputRefractive,
+                                  SettingsManager.liquidGlassInputLightIntensity,
+                                  SettingsManager.liquidGlassInputThickness,
+                                ]),
+                                builder: (_, __) {
+                                  final brightness = SettingsManager.elementBrightness.value;
                                   final baseColor = SettingsManager.getElementColor(
                                     Theme.of(context).colorScheme.surfaceContainerHighest,
                                     brightness,
                                   );
-                                  return ConstrainedBox(
+                                  final isMobile = !Platform.isWindows && !Platform.isMacOS && !Platform.isLinux;
+                                  final useGlass = isMobile && SettingsManager.liquidGlassOnInput.value;
+                                  final bar = ConstrainedBox(
                                     constraints: BoxConstraints(maxWidth: width),
                                     child: ChatInputBar(
                                       controller: _textCtrl,
@@ -2568,12 +2802,13 @@ class _FavoritesScreenState extends State<FavoritesScreen>
                                       onChanged: (_) => _onUserTyping(),
                                       hintText: AppLocalizations.of(context)
                                           .localizeHint('Type something...'),
-                                      backgroundColor: baseColor,
-                                      opacity: opacity,
-                                      borderColor: Theme.of(context)
+                                      backgroundColor: useGlass ? Colors.white : baseColor,
+                                      opacity: useGlass ? 0.0 : opacity,
+                                      borderColor: useGlass ? Colors.transparent : Theme.of(context)
                                           .colorScheme
                                           .outlineVariant
                                           .withValues(alpha: 0.15),
+                                      glassMode: useGlass,
                                       contentInsertionConfiguration:
                                           ContentInsertionConfiguration(
                                         allowedMimeTypes: const [
@@ -2610,6 +2845,44 @@ class _FavoritesScreenState extends State<FavoritesScreen>
                                         },
                                       ),
                                     ),
+                                  );
+                                  if (!useGlass) return bar;
+                                  final quality = SettingsManager.liquidGlassInputQuality.value;
+                                  final blur = SettingsManager.liquidGlassInputBlur.value;
+                                  final tint = SettingsManager.liquidGlassInputTint.value;
+                                  final saturation = SettingsManager.liquidGlassInputSaturation.value;
+                                  final chromatic = SettingsManager.liquidGlassInputChromatic.value;
+                                  final refractive = SettingsManager.liquidGlassInputRefractive.value;
+                                  final lightIntensity = SettingsManager.liquidGlassInputLightIntensity.value;
+                                  final thickness = SettingsManager.liquidGlassInputThickness.value;
+                                  final glassQuality = switch (quality) {
+                                    LiquidGlassQuality.fast    => GlassQuality.standard,
+                                    LiquidGlassQuality.medium  => GlassQuality.minimal,
+                                    LiquidGlassQuality.quality => GlassQuality.premium,
+                                  };
+                                  final isDark = Theme.of(context).brightness == Brightness.dark;
+                                  final tintColor = isDark
+                                      ? Colors.white.withValues(alpha: tint)
+                                      : Colors.black.withValues(alpha: tint);
+                                  final glassSettings = LiquidGlassSettings(
+                                    thickness: thickness,
+                                    blur: blur,
+                                    chromaticAberration: chromatic,
+                                    lightIntensity: lightIntensity,
+                                    refractiveIndex: refractive,
+                                    saturation: saturation,
+                                    ambientStrength: 0.8,
+                                    lightAngle: 0.75 * math.pi,
+                                    glassColor: tintColor,
+                                  );
+                                  return GlassCard(
+                                    useOwnLayer: true,
+                                    settings: glassSettings,
+                                    quality: glassQuality,
+                                    padding: EdgeInsets.zero,
+                                    shape: LiquidRoundedRectangle(borderRadius: 24),
+                                    clipBehavior: Clip.antiAlias,
+                                    child: bar,
                                   );
                                 },
                               ),

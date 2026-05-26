@@ -2,6 +2,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -12,15 +13,17 @@ import '../managers/account_manager.dart';
 import '../managers/decoy_data_manager.dart';
 import '../managers/decoy_manager.dart';
 import '../managers/external_server_manager.dart';
+import '../managers/lock_manager.dart';
 import '../managers/settings_manager.dart';
 import '../managers/unread_manager.dart';
 import '../models/chat_message.dart';
+import '../models/fav_folder.dart';
 import '../models/favorite_chat.dart';
 import '../models/group.dart';
 
 // ─────────────────────── enum ───────────────────────────────────────────────
 
-enum _CatType { chats, groups, channels, favorites, external }
+enum _CatType { chats, groups, channels, favorites, external, favFolder }
 
 // ─────────────────────── helpers ────────────────────────────────────────────
 
@@ -46,6 +49,7 @@ class _ItemOrbit {
   final bool hasUnread;
   final VoidCallback? onTap;
   final String? avatarKey;
+  final List<_ItemOrbit> children; // non-empty for folder items
 
   const _ItemOrbit({
     required this.id,
@@ -58,6 +62,7 @@ class _ItemOrbit {
     required this.hasUnread,
     this.onTap,
     this.avatarKey,
+    this.children = const [],
   });
 
   Offset posAt(Offset catCenter, double elapsed) {
@@ -68,18 +73,24 @@ class _ItemOrbit {
 }
 
 class _CatOrbit {
+  final String id;
   final _CatType catType;
   final double radius;
   final double basePhase;
   final double speed; // rad/s, negative = CW
   final List<_ItemOrbit> items;
+  final String? name;       // display label override (used for folder names)
+  final String? avatarKey;  // key into avatars map for cat-node avatar
 
   const _CatOrbit({
+    required this.id,
     required this.catType,
     required this.radius,
     required this.basePhase,
     required this.speed,
     required this.items,
+    this.name,
+    this.avatarKey,
   });
 
   Offset posAt(Offset origin, double elapsed) {
@@ -87,12 +98,13 @@ class _CatOrbit {
     return origin + Offset(math.cos(angle) * radius, math.sin(angle) * radius);
   }
 
-  String get label => switch (catType) {
+  String get label => name ?? switch (catType) {
         _CatType.chats => 'Chats',
         _CatType.groups => 'Groups',
         _CatType.channels => 'Channels',
         _CatType.favorites => 'Favorites',
         _CatType.external => 'External',
+        _CatType.favFolder => 'Folder',
       };
 
   IconData get icon => switch (catType) {
@@ -101,6 +113,7 @@ class _CatOrbit {
         _CatType.channels => Icons.campaign_outlined,
         _CatType.favorites => Icons.bookmarks_outlined,
         _CatType.external => Icons.public_outlined,
+        _CatType.favFolder => Icons.folder_outlined,
       };
 }
 
@@ -154,8 +167,8 @@ class _GraphPainter extends CustomPainter {
       canvas.drawCircle(origin, cat.radius, p);
     }
 
-    final catPos = <_CatType, Offset>{
-      for (final cat in categories) cat.catType: cat.posAt(origin, t),
+    final catPos = <String, Offset>{
+      for (final cat in categories) cat.id: cat.posAt(origin, t),
     };
 
     // edges: origin → category
@@ -164,12 +177,12 @@ class _GraphPainter extends CustomPainter {
       ..strokeWidth = 1.2
       ..color = colors.primary.withValues(alpha: 0.22);
     for (final cat in categories) {
-      canvas.drawLine(origin, catPos[cat.catType]!, p);
+      canvas.drawLine(origin, catPos[cat.id]!, p);
     }
 
     // item orbit rings + category → item edges
     for (final cat in categories) {
-      final cp = catPos[cat.catType]!;
+      final cp = catPos[cat.id]!;
       for (final item in cat.items) {
         p
           ..style = PaintingStyle.stroke
@@ -181,19 +194,49 @@ class _GraphPainter extends CustomPainter {
       }
     }
 
-    // category nodes
+    // child (folder-chat) orbit rings + folder → child edges
     for (final cat in categories) {
-      _drawCat(canvas, catPos[cat.catType]!, cat);
+      final cp = catPos[cat.id]!;
+      for (final item in cat.items) {
+        if (item.children.isEmpty) continue;
+        final ip = item.posAt(cp, t);
+        for (final child in item.children) {
+          p
+            ..style = PaintingStyle.stroke
+            ..color = colors.onSurface.withValues(alpha: 0.035)
+            ..strokeWidth = 0.8;
+          canvas.drawCircle(ip, child.radius, p);
+          p.color = colors.tertiary.withValues(alpha: 0.14);
+          canvas.drawLine(ip, child.posAt(ip, t), p);
+        }
+      }
     }
 
-    // item nodes
+    // category nodes
     for (final cat in categories) {
-      final cp = catPos[cat.catType]!;
+      _drawCat(canvas, catPos[cat.id]!, cat);
+    }
+
+    // item nodes (folder items drawn with ring indicator)
+    for (final cat in categories) {
+      final cp = catPos[cat.id]!;
       for (final item in cat.items) {
         final ip = item.posAt(cp, t);
         final isOnline =
             item.catType == _CatType.chats && onlineUsers.contains(item.label);
         _drawItem(canvas, ip, item, lt, isOnline);
+      }
+    }
+
+    // child nodes orbiting their folder items
+    for (final cat in categories) {
+      final cp = catPos[cat.id]!;
+      for (final item in cat.items) {
+        if (item.children.isEmpty) continue;
+        final ip = item.posAt(cp, t);
+        for (final child in item.children) {
+          _drawItem(canvas, child.posAt(ip, t), child, lt, false);
+        }
       }
     }
 
@@ -249,18 +292,32 @@ class _GraphPainter extends CustomPainter {
     const r = _catR;
     final p = Paint();
 
+    final isFolder = cat.catType == _CatType.favFolder;
+    final bgColor =
+        isFolder ? colors.tertiaryContainer : colors.secondaryContainer;
+    final fgColor = isFolder
+        ? colors.onTertiaryContainer
+        : colors.onSecondaryContainer;
+    final borderColor =
+        isFolder ? colors.tertiary : colors.secondary;
+
     p
       ..style = PaintingStyle.fill
-      ..color = colors.secondaryContainer.withValues(alpha: 0.28);
+      ..color = bgColor.withValues(alpha: 0.28);
     canvas.drawCircle(pos, r + 3, p);
-    p.color = colors.secondaryContainer;
+    p.color = bgColor;
     canvas.drawCircle(pos, r, p);
 
-    _paintIcon(canvas, pos, cat.icon, r * 0.88, colors.onSecondaryContainer);
+    final img = cat.avatarKey != null ? avatars[cat.avatarKey] : null;
+    if (img != null) {
+      _clipAvatar(canvas, pos, r - 1, img);
+    } else {
+      _paintIcon(canvas, pos, cat.icon, r * 0.88, fgColor);
+    }
 
     p
       ..style = PaintingStyle.stroke
-      ..color = colors.secondary.withValues(alpha: 0.50)
+      ..color = borderColor.withValues(alpha: 0.50)
       ..strokeWidth = 1.6;
     canvas.drawCircle(pos, r, p);
 
@@ -278,18 +335,27 @@ class _GraphPainter extends CustomPainter {
     // online glow emanates from behind the node — drawn first
     if (isOnline) _drawOnlineGlow(canvas, pos, r, lt);
 
+    // folder mini-planet indicator: faint ring showing it has child orbits
+    if (item.children.isNotEmpty) {
+      p
+        ..style = PaintingStyle.stroke
+        ..color = colors.tertiary.withValues(alpha: 0.38)
+        ..strokeWidth = 1.4;
+      canvas.drawCircle(pos, r + 5, p);
+    }
+
     final bg = switch (item.catType) {
       _CatType.chats => colors.surfaceContainerHighest,
       _CatType.groups => colors.tertiaryContainer,
       _CatType.channels => colors.primaryContainer,
-      _CatType.favorites => colors.secondaryContainer,
+      _CatType.favorites || _CatType.favFolder => colors.secondaryContainer,
       _CatType.external => colors.surfaceContainer,
     };
     final fg = switch (item.catType) {
       _CatType.chats => colors.onSurfaceVariant,
       _CatType.groups => colors.onTertiaryContainer,
       _CatType.channels => colors.onPrimaryContainer,
-      _CatType.favorites => colors.onSecondaryContainer,
+      _CatType.favorites || _CatType.favFolder => colors.onSecondaryContainer,
       _CatType.external => colors.onSurface,
     };
 
@@ -474,6 +540,9 @@ class _AccountGraphViewState extends State<AccountGraphView>
   static double _savedLiveElapsed = 0.0;
   static Matrix4? _savedTransform;
 
+  // avatar byte cache — survives widget dispose so remounts don't re-fetch
+  static final Map<String, Uint8List> _cachedBytes = {};
+
   // ticker always runs; orbitElapsed pauses when animation is off
   late final Ticker _ticker;
   final ValueNotifier<double> _orbitElapsed = ValueNotifier(0.0);
@@ -524,6 +593,7 @@ class _AccountGraphViewState extends State<AccountGraphView>
     onlineUsersNotifier.addListener(_onOnlineChanged);
     SettingsManager.graphOrbitSpeed.addListener(_scheduleRebuild);
     ExternalServerManager.externalGroups.addListener(_scheduleRebuild);
+    LockManager.lockedChats.addListener(_scheduleRebuild);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final preserve = SettingsManager.graphPreservePosition.value;
@@ -567,6 +637,7 @@ class _AccountGraphViewState extends State<AccountGraphView>
     onlineUsersNotifier.removeListener(_onOnlineChanged);
     SettingsManager.graphOrbitSpeed.removeListener(_scheduleRebuild);
     ExternalServerManager.externalGroups.removeListener(_scheduleRebuild);
+    LockManager.lockedChats.removeListener(_scheduleRebuild);
 
     for (final img in _avatars.values) {
       img.dispose();
@@ -617,6 +688,7 @@ class _AccountGraphViewState extends State<AccountGraphView>
       _avatars.remove(key)?.dispose();
       _loadingAvatar.remove(key);
       _missingAvatarKeys.remove(key);
+      _cachedBytes.remove(key);
     }
     _scheduleRebuild();
   }
@@ -629,6 +701,7 @@ class _AccountGraphViewState extends State<AccountGraphView>
     _avatars.clear();
     _loadingAvatar.clear();
     _missingAvatarKeys.clear();
+    _cachedBytes.clear();
     _loadData();
   }
 
@@ -672,14 +745,18 @@ class _AccountGraphViewState extends State<AccountGraphView>
     final state = rootScreenKey.currentState;
     final username = state?.currentUsername ?? '';
     final favorites = state?.favorites ?? <FavoriteChat>[];
+    final favFolders = state?.favFolders ?? <FavFolder>[];
     final allChats = state?.chats ?? <String, List<ChatMessage>>{};
+    final inFolderIds =
+        favFolders.expand((f) => f.chatIds).toSet();
 
     _myUsername = username;
     _myDisplayName = username;
 
-    // raw chat keys (not favorites/groups)
+    // raw chat keys (not favorites/groups), excluding locked DMs
     var chatKeys = allChats.keys
         .where((k) => !k.startsWith('fav:') && !k.startsWith('grp:'))
+        .where((k) => !LockManager.isLocked('dm_${_peerFromKey(k, username)}'))
         .toList();
 
     // sort by last message time: newest = index 0 = innermost orbit
@@ -695,28 +772,33 @@ class _AccountGraphViewState extends State<AccountGraphView>
     });
 
     // main server groups (AccountManager cache never has externalServerId)
-    final mainGroups = _groups.where((g) => !g.isChannel).toList();
-    final mainChannels = _groups.where((g) => g.isChannel).toList();
+    final mainGroups = _groups
+        .where((g) => !g.isChannel && !LockManager.isLocked('ng_${g.id}'))
+        .toList();
+    final mainChannels = _groups
+        .where((g) => g.isChannel && !LockManager.isLocked('ng_${g.id}'))
+        .toList();
 
     // external groups come from ExternalServerManager, never from _groups
-    final extGroups = DecoyManager.isActive.value
-        ? DecoyDataManager.fakeGroups
-            .where((g) => g.externalServerId != null)
-            .toList()
-        : ExternalServerManager.externalGroups.value;
+    final extGroups = (DecoyManager.isActive.value
+            ? DecoyDataManager.fakeGroups
+                .where((g) => g.externalServerId != null)
+                .toList()
+            : ExternalServerManager.externalGroups.value)
+        .where((g) =>
+            !LockManager.isLocked('eg_${g.externalServerId}_${g.id}'))
+        .toList();
 
     final orbitSec = SettingsManager.graphOrbitSpeed.value;
     final catSpeed = -(2 * math.pi / orbitSec);
     final itemBaseSpeed = (2 * math.pi / (orbitSec * 0.667));
-    const catBaseR = 180.0; // minimum cat orbit radius (0 items)
-    const catItemFactor =
-        22.0; // each item adds this many px to cat orbit radius
-    const catSeqOffset =
-        14.0; // tie-breaker so same-count cats never share a ring
+    const catBaseR = 180.0; // starting radius before first category
     const itemBaseR = 110.0;
     const itemStep = 18.0; // unique orbit per item
 
-    final catDefs = <(_CatType, List<_ItemOrbit>)>[];
+    // (catType, items, id, name-override, avatarKey)
+    final catDefs =
+        <(_CatType, List<_ItemOrbit>, String, String?, String?)>[];
 
     // ── Chats (newest = innermost) ─────────────────────────────────────────
     if (chatKeys.isNotEmpty) {
@@ -735,7 +817,7 @@ class _AccountGraphViewState extends State<AccountGraphView>
           avatarKey: peer,
         ));
       }
-      catDefs.add((_CatType.chats, items));
+      catDefs.add((_CatType.chats, items, 'chats', null, null));
     }
 
     // ── Groups ─────────────────────────────────────────────────────────────
@@ -758,7 +840,7 @@ class _AccountGraphViewState extends State<AccountGraphView>
           avatarKey: 'grp_${g.id}_${g.avatarVersion}',
         ));
       }
-      catDefs.add((_CatType.groups, items));
+      catDefs.add((_CatType.groups, items, 'groups', null, null));
     }
 
     // ── Channels ───────────────────────────────────────────────────────────
@@ -781,36 +863,103 @@ class _AccountGraphViewState extends State<AccountGraphView>
           avatarKey: 'grp_${g.id}_${g.avatarVersion}',
         ));
       }
-      catDefs.add((_CatType.channels, items));
+      catDefs.add((_CatType.channels, items, 'channels', null, null));
     }
 
-    // ── Favorites — real message count from allChats['fav:{id}'] ───────────
-    if (favorites.isNotEmpty) {
-      final items = <_ItemOrbit>[];
-      for (int ii = 0; ii < favorites.length; ii++) {
-        final fav = favorites[ii];
-        final rawCount = allChats['fav:${fav.id}']?.length ?? 0;
+    // ── Favorites: unfoldered chats + folder mini-planets with children ───────
+    const childBaseR = itemBaseR;
+    const childStep = itemStep;
+    final unfolderedFavs = favorites
+        .where((f) =>
+            !inFolderIds.contains(f.id) &&
+            !LockManager.isLocked('fav_${f.id}'))
+        .toList();
+    final allFavItems = <_ItemOrbit>[];
+    int favIdx = 0;
+
+    for (final fav in unfolderedFavs) {
+      final favKey = 'fav_${fav.id}';
+      if (fav.avatarPath != null && fav.avatarPath!.isNotEmpty) {
+        _favAvatarPaths[favKey] = fav.avatarPath!;
+      } else {
+        _favAvatarPaths.remove(favKey);
+      }
+      allFavItems.add(_ItemOrbit(
+        id: fav.id,
+        label: fav.title,
+        catType: _CatType.favorites,
+        radius: itemBaseR + favIdx * itemStep,
+        basePhase: favIdx * 0.42,
+        speed: itemBaseSpeed * (0.80 + (favIdx % 5) * 0.08),
+        msgCount: allChats['fav:${fav.id}']?.length ?? 0,
+        hasUnread: false,
+        onTap: () => widget.onFavoriteTap?.call(fav.id),
+        avatarKey: favKey,
+      ));
+      favIdx++;
+    }
+
+    for (final folder in favFolders) {
+      if (LockManager.isLocked('fav_folder_${folder.id}')) continue;
+      final chatsInFolder = folder.chatIds
+          .map((id) => favorites.where((f) => f.id == id).firstOrNull)
+          .whereType<FavoriteChat>()
+          .where((f) => !LockManager.isLocked('fav_${f.id}'))
+          .toList();
+      if (chatsInFolder.isEmpty) continue;
+
+      final folderKey = 'folder_${folder.id}';
+      if (folder.avatarPath != null && folder.avatarPath!.isNotEmpty) {
+        _favAvatarPaths[folderKey] = folder.avatarPath!;
+      } else {
+        _favAvatarPaths.remove(folderKey);
+      }
+
+      final children = <_ItemOrbit>[];
+      for (int ci = 0; ci < chatsInFolder.length; ci++) {
+        final fav = chatsInFolder[ci];
         final favKey = 'fav_${fav.id}';
-        // track local avatar path so _loadAllAvatars can load from file
         if (fav.avatarPath != null && fav.avatarPath!.isNotEmpty) {
           _favAvatarPaths[favKey] = fav.avatarPath!;
         } else {
           _favAvatarPaths.remove(favKey);
         }
-        items.add(_ItemOrbit(
+        children.add(_ItemOrbit(
           id: fav.id,
           label: fav.title,
-          catType: _CatType.favorites,
-          radius: itemBaseR + ii * itemStep,
-          basePhase: ii * 0.42,
-          speed: itemBaseSpeed * (0.80 + (ii % 5) * 0.08),
-          msgCount: rawCount,
+          catType: _CatType.favFolder,
+          radius: childBaseR + ci * childStep,
+          basePhase: ci * 0.67,
+          speed: itemBaseSpeed * 1.4 * (0.80 + (ci % 5) * 0.08),
+          msgCount: allChats['fav:${fav.id}']?.length ?? 0,
           hasUnread: false,
           onTap: () => widget.onFavoriteTap?.call(fav.id),
           avatarKey: favKey,
         ));
       }
-      catDefs.add((_CatType.favorites, items));
+
+      // push folder outward so its child orbits don't overlap Favorites items
+      final folderR = itemBaseR +
+          favIdx * itemStep +
+          (childBaseR + children.length * childStep) * 0.55;
+      allFavItems.add(_ItemOrbit(
+        id: folder.id,
+        label: folder.name,
+        catType: _CatType.favFolder,
+        radius: folderR,
+        basePhase: favIdx * 0.42,
+        speed: itemBaseSpeed * (0.80 + (favIdx % 5) * 0.08),
+        msgCount: 0,
+        hasUnread: false,
+        onTap: null,
+        avatarKey: folderKey,
+        children: children,
+      ));
+      favIdx++;
+    }
+
+    if (allFavItems.isNotEmpty) {
+      catDefs.add((_CatType.favorites, allFavItems, 'favorites', null, null));
     }
 
     // ── External groups & channels from ExternalServerManager ──────────────
@@ -836,23 +985,47 @@ class _AccountGraphViewState extends State<AccountGraphView>
           avatarKey: extAvatarKey,
         ));
       }
-      catDefs.add((_CatType.external, items));
+      catDefs.add((_CatType.external, items, 'external', null, null));
     }
 
-    // categories: more items → larger orbit radius from center
+    // Original size-based formula, but folder items contribute their child
+    // count (at half weight) so Favorites with large folders naturally sits
+    // further out without pushing everything else too far.
+    const catItemFactor = 22.0;
+    const catSeqOffset = 14.0;
+
     final n = catDefs.length;
-    final newCats = <_CatOrbit>[
-      for (int i = 0; i < n; i++)
-        _CatOrbit(
-          catType: catDefs[i].$1,
-          radius: catBaseR +
-              catDefs[i].$2.length * catItemFactor +
-              i * catSeqOffset,
-          basePhase: n > 0 ? i * (2 * math.pi / n) : 0.0,
-          speed: catSpeed,
-          items: catDefs[i].$2,
-        ),
-    ];
+    final newCats = <_CatOrbit>[];
+    for (int i = 0; i < n; i++) {
+      final items = catDefs[i].$2;
+      // effective item count: each folder item adds half its children count
+      final effectiveCount = items.fold<double>(
+        0,
+        (sum, item) => sum + 1 + item.children.length * 0.5,
+      );
+      // extra push for folder children: half the outer child orbit radius
+      double folderPush = 0;
+      for (final item in items) {
+        if (item.children.isNotEmpty) {
+          folderPush =
+              math.max(folderPush, item.children.last.radius * 0.5);
+        }
+      }
+      final catR = catBaseR +
+          effectiveCount * catItemFactor +
+          i * catSeqOffset +
+          folderPush;
+      newCats.add(_CatOrbit(
+        id: catDefs[i].$3,
+        catType: catDefs[i].$1,
+        name: catDefs[i].$4,
+        avatarKey: catDefs[i].$5,
+        radius: catR,
+        basePhase: n > 0 ? i * (2 * math.pi / n) : 0.0,
+        speed: catSpeed,
+        items: items,
+      ));
+    }
 
     setState(() => _categories = newCats);
     _scheduleAvatarWarmup();
@@ -887,6 +1060,9 @@ class _AccountGraphViewState extends State<AccountGraphView>
   }
 
   Future<void> _loadPriorityAvatars() async {
+    // Instantly decode any bytes already cached from a previous mount
+    await _warmFromCache();
+
     final token = _token;
     if (token == null || !mounted) return;
     if (DecoyManager.isActive.value) return;
@@ -945,7 +1121,8 @@ class _AccountGraphViewState extends State<AccountGraphView>
             }
           }
         }
-      } else if (catType == _CatType.favorites) {
+      } else if (catType == _CatType.favorites ||
+          catType == _CatType.favFolder) {
         final path = _favAvatarPaths[key];
         if (path != null && path.isNotEmpty) {
           await _loadLocalAvatar(key, path);
@@ -958,6 +1135,9 @@ class _AccountGraphViewState extends State<AccountGraphView>
       }
       if (!mounted) return;
     }
+
+    // Load remaining avatars not covered by the priority limit
+    await _loadAllAvatars();
   }
 
   Future<void> _loadAllAvatars() async {
@@ -1018,17 +1198,50 @@ class _AccountGraphViewState extends State<AccountGraphView>
               }
             }
           }
-        } else if (cat.catType == _CatType.favorites) {
-          // load from local file path if set
+        } else if (cat.catType == _CatType.favorites ||
+            cat.catType == _CatType.favFolder) {
           final path = _favAvatarPaths[key];
           if (path != null && path.isNotEmpty) {
             await _loadLocalAvatar(key, path);
           }
         }
 
+        // load children of folder items (chats inside the folder)
+        for (final child in item.children) {
+          final ck = child.avatarKey;
+          if (ck == null) continue;
+          final path = _favAvatarPaths[ck];
+          if (path != null && path.isNotEmpty) {
+            await _loadLocalAvatar(ck, path);
+          }
+          if (!mounted) return;
+        }
+
         if (!mounted) return;
       }
     }
+  }
+
+  // Decode any already-cached bytes into _avatars without hitting network/disk.
+  Future<void> _warmFromCache() async {
+    if (_cachedBytes.isEmpty) return;
+    var decoded = 0;
+    for (final entry in _cachedBytes.entries) {
+      if (_avatars.containsKey(entry.key)) continue;
+      try {
+        final codec = await ui.instantiateImageCodec(
+          entry.value,
+          targetWidth: 80,
+          targetHeight: 80,
+        );
+        final frame = await codec.getNextFrame();
+        if (!mounted) return;
+        _avatars[entry.key] = frame.image;
+        decoded++;
+        if (decoded % 8 == 0) await Future.delayed(Duration.zero);
+      } catch (_) {}
+    }
+    if (mounted && decoded > 0) setState(() {});
   }
 
   Future<void> _loadLocalAvatar(String key, String path) async {
@@ -1037,6 +1250,7 @@ class _AccountGraphViewState extends State<AccountGraphView>
     try {
       final bytes = await File(path).readAsBytes();
       if (!mounted) return;
+      _cachedBytes[key] = bytes;
       final codec = await ui.instantiateImageCodec(bytes,
           targetWidth: 80, targetHeight: 80);
       final frame = await codec.getNextFrame();
@@ -1060,6 +1274,7 @@ class _AccountGraphViewState extends State<AccountGraphView>
         headers: {'Authorization': 'Bearer $token'},
       );
       if (resp.statusCode == 200 && mounted) {
+        _cachedBytes[key] = resp.bodyBytes;
         final codec = await ui.instantiateImageCodec(
           resp.bodyBytes,
           targetWidth: 80,
@@ -1090,9 +1305,18 @@ class _AccountGraphViewState extends State<AccountGraphView>
     // targetR = furthest edge across all categories so initial zoom fits everything
     double targetR = 700.0;
     for (final cat in _categories) {
-      final outerItem = cat.items.isEmpty ? 110.0 : cat.items.last.radius;
-      final edge = cat.radius + outerItem + 60;
-      if (edge > targetR) targetR = edge;
+      if (cat.items.isEmpty) {
+        final edge = cat.radius + 110.0 + 60;
+        if (edge > targetR) targetR = edge;
+        continue;
+      }
+      for (final item in cat.items) {
+        final childOuter = item.children.isNotEmpty
+            ? item.children.last.radius + _GraphPainter._itemR
+            : 0.0;
+        final edge = cat.radius + item.radius + childOuter + 60;
+        if (edge > targetR) targetR = edge;
+      }
     }
     final scale = math.min(vs.width / 2 / targetR, vs.height / 2 / targetR);
     final tx = vs.width / 2 - _origin.dx * scale;
@@ -1115,9 +1339,16 @@ class _AccountGraphViewState extends State<AccountGraphView>
     for (final cat in _categories) {
       final cp = cat.posAt(_origin, t);
       for (final item in cat.items) {
-        if ((pt - item.posAt(cp, t)).distance < _GraphPainter._itemR + 10) {
+        final ip = item.posAt(cp, t);
+        if ((pt - ip).distance < _GraphPainter._itemR + 10) {
           if (!_isHoveringItem) setState(() => _isHoveringItem = true);
           return;
+        }
+        for (final child in item.children) {
+          if ((pt - child.posAt(ip, t)).distance < _GraphPainter._itemR + 10) {
+            if (!_isHoveringItem) setState(() => _isHoveringItem = true);
+            return;
+          }
         }
       }
     }
@@ -1137,7 +1368,15 @@ class _AccountGraphViewState extends State<AccountGraphView>
     for (final cat in _categories) {
       final cp = cat.posAt(_origin, t);
       for (final item in cat.items) {
-        if ((pt - item.posAt(cp, t)).distance < _GraphPainter._itemR + 10) {
+        final ip = item.posAt(cp, t);
+        // check children first (they're drawn on top)
+        for (final child in item.children) {
+          if ((pt - child.posAt(ip, t)).distance < _GraphPainter._itemR + 10) {
+            child.onTap?.call();
+            return;
+          }
+        }
+        if ((pt - ip).distance < _GraphPainter._itemR + 10) {
           item.onTap?.call();
           return;
         }

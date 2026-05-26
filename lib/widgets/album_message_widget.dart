@@ -6,12 +6,13 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
-import 'package:gallery_saver_plus/gallery_saver.dart';
 import 'package:file_picker/file_picker.dart';
 import '../utils/image_file_cache.dart';
+import '../utils/file_utils.dart';
 import '../utils/image_size_cache.dart';
 import '../globals.dart';
 import '../managers/external_server_manager.dart';
+import 'chat_images_scope.dart';
 
 class AlbumItem {
   final String filename; 
@@ -263,6 +264,11 @@ class _AlbumThumbState extends State<_AlbumThumb> {
         final appDoc = await getApplicationDocumentsDirectory();
         resolved = File('${appDoc.path}/lan_media/$lanFilename');
         if (!await resolved.exists()) throw Exception('LAN file not found');
+      } else if (filename.startsWith('fav://')) {
+        final favFilename = filename.substring(6);
+        final appDoc = await getApplicationDocumentsDirectory();
+        resolved = File('${appDoc.path}/fav_media/$favFilename');
+        if (!await resolved.exists()) throw Exception('Favorites file not found');
       } else if (filename.startsWith('http')) {
         var url = filename;
         final pathSeg = Uri.parse(url).pathSegments.last;
@@ -313,11 +319,30 @@ class _AlbumThumbState extends State<_AlbumThumb> {
   }
 
   void _openGallery() {
+    final scope = ChatImagesScope.maybeOf(context);
+    List<AlbumItem> galleryItems;
+    int initialIdx;
+
+    if (scope != null && scope.allImages.isNotEmpty) {
+      final idx = scope.allImages.indexWhere((i) => i.filename == widget.item.filename);
+      if (idx >= 0) {
+        galleryItems = scope.allImages;
+        initialIdx = idx;
+      } else {
+        galleryItems = widget.allItems;
+        initialIdx = widget.index;
+      }
+    } else {
+      galleryItems = widget.allItems;
+      initialIdx = widget.index;
+    }
+
     Navigator.of(context).push(MaterialPageRoute(
       fullscreenDialog: true,
-      builder: (_) => _AlbumGallery(
-        allItems: widget.allItems,
-        initialIndex: widget.index,
+      builder: (_) => AlbumGallery(
+        allItems: galleryItems,
+        albumItems: widget.allItems.length > 1 ? widget.allItems : null,
+        initialIndex: initialIdx,
         peerUsername: widget.peerUsername,
         isOutgoing: widget.isOutgoing,
       ),
@@ -367,25 +392,28 @@ class _AlbumThumbState extends State<_AlbumThumb> {
   }
 }
 
-class _AlbumGallery extends StatefulWidget {
+class AlbumGallery extends StatefulWidget {
   final List<AlbumItem> allItems;
   final int initialIndex;
   final String peerUsername;
   final bool isOutgoing;
+  // Non-null only when opened from an actual album message; used for "Save All".
+  final List<AlbumItem>? albumItems;
 
-  const _AlbumGallery({
+  const AlbumGallery({
     Key? key,
     required this.allItems,
     required this.initialIndex,
     required this.peerUsername,
     required this.isOutgoing,
+    this.albumItems,
   }) : super(key: key);
 
   @override
-  State<_AlbumGallery> createState() => _AlbumGalleryState();
+  State<AlbumGallery> createState() => _AlbumGalleryState();
 }
 
-class _AlbumGalleryState extends State<_AlbumGallery> {
+class _AlbumGalleryState extends State<AlbumGallery> {
   late PageController _ctrl;
   late ScrollController _stripCtrl;
   late int _current;
@@ -576,6 +604,11 @@ class _AlbumGalleryState extends State<_AlbumGallery> {
   }
 
   Future<void> _showSaveDialog() async {
+    final isAlbum = (widget.albumItems?.length ?? 0) > 1;
+    if (!isAlbum) {
+      await _saveCurrentImage();
+      return;
+    }
     final result = await showDialog<_SaveChoice>(
       context: context,
       builder: (_) => AlertDialog(
@@ -622,7 +655,7 @@ class _AlbumGalleryState extends State<_AlbumGallery> {
 
       if (Platform.isAndroid || Platform.isIOS) {
         
-        final saved = await GallerySaver.saveImage(file.path, albumName: 'ONYX');
+        final saved = await saveImageToGallery(file.path);
         rootScreenKey.currentState?.showSnack(
             saved == true ? 'Saved to gallery' : 'Failed to save to gallery');
         return;
@@ -675,7 +708,7 @@ class _AlbumGalleryState extends State<_AlbumGallery> {
       return;
     }
 
-    final items = widget.allItems;
+    final items = widget.albumItems ?? widget.allItems;
     int saved = 0;
     int failed = 0;
 
@@ -684,7 +717,7 @@ class _AlbumGalleryState extends State<_AlbumGallery> {
         final cached = imageFileCache[item.filename];
         if (cached == null) { failed++; continue; }
         try {
-          final result = await GallerySaver.saveImage(cached.file.path, albumName: 'ONYX');
+          final result = await saveImageToGallery(cached.file.path);
           if (result == true) { saved++; } else { failed++; }
         } catch (_) { failed++; }
       }

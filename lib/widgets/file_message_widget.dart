@@ -74,7 +74,7 @@ class _FileMessageWidgetState extends State<FileMessageWidget> {
 
       if (filename.startsWith('lan://')) {
         debugPrint('[FileWidget] LAN file detected: $filename');
-        final lanFilename = filename.substring(6); 
+        final lanFilename = filename.substring(6);
         final appDocuments = await getApplicationDocumentsDirectory();
         final lanFile = File('${appDocuments.path}/lan_media/$lanFilename');
         if (await lanFile.exists()) {
@@ -82,6 +82,18 @@ class _FileMessageWidgetState extends State<FileMessageWidget> {
           return lanFile;
         } else {
           debugPrint('FileMessageWidget: LAN file not found: $lanFilename');
+          return null;
+        }
+      }
+
+      if (filename.startsWith('fav://')) {
+        final favFilename = filename.substring(6);
+        final appDocuments = await getApplicationDocumentsDirectory();
+        final favFile = File('${appDocuments.path}/fav_media/$favFilename');
+        if (await favFile.exists()) {
+          return favFile;
+        } else {
+          debugPrint('FileMessageWidget: Favorites file not found: $favFilename');
           return null;
         }
       }

@@ -16,6 +16,7 @@ class ServerConnectionDialog extends StatefulWidget {
 class _ServerConnectionDialogState extends State<ServerConnectionDialog> {
   final _hostController = TextEditingController();
   final _usernameController = TextEditingController();
+  final _nicknameController = TextEditingController();
   final _passwordController = TextEditingController();
 
   bool _loading = false;
@@ -36,6 +37,9 @@ class _ServerConnectionDialogState extends State<ServerConnectionDialog> {
     final current = await AccountManager.getCurrentAccount();
     if (current != null && mounted) {
       _usernameController.text = current;
+      if (_nicknameController.text.isEmpty) {
+        _nicknameController.text = current;
+      }
     }
   }
 
@@ -43,6 +47,7 @@ class _ServerConnectionDialogState extends State<ServerConnectionDialog> {
   void dispose() {
     _hostController.dispose();
     _usernameController.dispose();
+    _nicknameController.dispose();
     _passwordController.dispose();
     super.dispose();
   }
@@ -93,7 +98,6 @@ class _ServerConnectionDialogState extends State<ServerConnectionDialog> {
 
     var username = _usernameController.text.trim();
     if (username.isEmpty) {
-      
       await _loadDefaultUsername();
       username = _usernameController.text.trim();
       if (username.isEmpty) {
@@ -101,6 +105,9 @@ class _ServerConnectionDialogState extends State<ServerConnectionDialog> {
         return;
       }
     }
+
+    final nickname = _nicknameController.text.trim();
+    final effectiveName = nickname.isEmpty ? username : nickname;
 
     final password = _passwordController.text;
     if (!isChannel && password.isEmpty) {
@@ -114,9 +121,9 @@ class _ServerConnectionDialogState extends State<ServerConnectionDialog> {
       final server = await ExternalServerManager.registerOnServer(
         host: _parsedHost,
         port: _parsedPort,
-        username: username,
-        displayName: username,
-        password: isChannel ? '' : password,  
+        username: effectiveName,
+        displayName: effectiveName,
+        password: isChannel ? '' : password,
         serverInfo: _serverInfo!,
       );
 
@@ -247,50 +254,39 @@ class _ServerConnectionDialogState extends State<ServerConnectionDialog> {
                   const SecurityWarningCard(),
                   const SizedBox(height: 16),
 
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: colorScheme.primaryContainer.withValues(alpha: 0.2),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: colorScheme.primary.withValues(alpha: 0.3)),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(Icons.info_outline, color: colorScheme.primary, size: 20),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                AppLocalizations.of(context).identityVisible,
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                  color: colorScheme.onSurface,
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Row(
-                                children: [
-                                  Text(
-                                    '${AppLocalizations.of(context).usernameLabel}: ',
-                                    style: TextStyle(fontSize: 11, color: colorScheme.onSurface.withValues(alpha: 0.7)),
-                                  ),
-                                  Text(
-                                    _usernameController.text,
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.w600,
-                                      color: colorScheme.primary,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
+                  TextField(
+                    controller: _nicknameController,
+                    decoration: InputDecoration(
+                      labelText: AppLocalizations.of(context).usernameLabel,
+                      hintText: _usernameController.text,
+                      helperText: AppLocalizations.of(context).identityVisible,
+                      prefixIcon: Icon(Icons.person_outline,
+                          color: colorScheme.onSurface.withValues(alpha: 0.6)),
+                      filled: true,
+                      fillColor: SettingsManager.getElementColor(
+                              colorScheme.surfaceContainerHighest, brightness)
+                          .withValues(alpha: 0.5),
+                      contentPadding: const EdgeInsets.symmetric(
+                          vertical: 14, horizontal: 16),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(16),
+                        borderSide: BorderSide(
+                            color: colorScheme.outlineVariant
+                                .withValues(alpha: 0.15),
+                            width: 1.0),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(16),
+                        borderSide: BorderSide(
+                            color: colorScheme.outlineVariant
+                                .withValues(alpha: 0.15),
+                            width: 1.0),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(16),
+                        borderSide: BorderSide(
+                            color: colorScheme.primary, width: 1.4),
+                      ),
                     ),
                   ),
                   const SizedBox(height: 12),

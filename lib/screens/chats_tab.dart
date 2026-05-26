@@ -13,6 +13,9 @@ import '../managers/user_cache.dart';
 import '../l10n/app_localizations.dart';
 import '../managers/blocklist_manager.dart';
 import '../managers/mute_manager.dart';
+import '../managers/lock_manager.dart';
+import '../dialogs/pin_lock_dialog.dart';
+import '../widgets/adaptive_glass_card.dart';
 
 String _getFileTypeLabel(String filename) {
   final ext = filename.toLowerCase();
@@ -168,38 +171,6 @@ String getPreviewText(String rawContent) {
   return rawContent;
 }
 
-Widget _glassCard({required BuildContext context, required Widget child}) {
-  final cs = Theme.of(context).colorScheme;
-  return ValueListenableBuilder<double>(
-    valueListenable: SettingsManager.elementOpacity,
-    builder: (_, opacity, __) {
-      return ValueListenableBuilder<double>(
-        valueListenable: SettingsManager.elementBrightness,
-        builder: (_, brightness, __) {
-          final baseColor = SettingsManager.getElementColor(
-            cs.surfaceContainerHighest,
-            brightness,
-          );
-          return ClipRRect(
-            borderRadius: BorderRadius.circular(16),
-            child: Container(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-              decoration: BoxDecoration(
-                color: baseColor.withValues(alpha: opacity),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(
-                  color: cs.outlineVariant.withValues(alpha: 0.15),
-                  width: 1,
-                ),
-              ),
-              child: child,
-            ),
-          );
-        },
-      );
-    },
-  );
-}
 
 class _ChatSumm {
   final String chatId;
@@ -389,8 +360,8 @@ class _ChatsTabState extends State<ChatsTab> with TickerProviderStateMixin, Auto
   @override
   void didUpdateWidget(covariant ChatsTab oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // chatsVersion listener handles data updates; only rebuild if username changed
-    if (widget.username != oldWidget.username) {
+    if (widget.username != oldWidget.username ||
+        !identical(widget.chats, oldWidget.chats)) {
       setState(_rebuildSummaries);
     }
   }
@@ -466,6 +437,7 @@ class _ChatsTabState extends State<ChatsTab> with TickerProviderStateMixin, Auto
           TextButton(
             onPressed: () {
               Navigator.of(context).pop();
+              LockManager.removeLock('dm_${summary.otherUsername}');
               widget.onDeleteChat(summary.chatId);
             },
             child: Text(
@@ -527,6 +499,18 @@ class _ChatsTabState extends State<ChatsTab> with TickerProviderStateMixin, Auto
     );
   }
 
+  Future<void> _openChatWithLockCheck(BuildContext ctx, String username) async {
+    final lockId = 'dm_$username';
+    if (!LockManager.isLocked(lockId)) {
+      widget.onOpenChat(username);
+      return;
+    }
+    final ok = await showPinDialog(ctx, PinDialogMode.verify, lockId);
+    if (ok && mounted) {
+      widget.onOpenChat(username);
+    }
+  }
+
   void _showChatActionsSheet(BuildContext context, _ChatSumm summary) {
     final colorScheme = Theme.of(context).colorScheme;
     final isBlocked = BlocklistManager.isBlocked(summary.otherUsername);
@@ -578,6 +562,32 @@ class _ChatsTabState extends State<ChatsTab> with TickerProviderStateMixin, Auto
                       }
                     },
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  ValueListenableBuilder<Set<String>>(
+                    valueListenable: LockManager.lockedChats,
+                    builder: (_, locked, __) {
+                      final lockId = 'dm_${summary.otherUsername}';
+                      final isLocked = locked.contains(lockId);
+                      return ListTile(
+                        leading: Icon(
+                          isLocked ? Icons.lock_open_rounded : Icons.lock_rounded,
+                          color: colorScheme.onSurface,
+                        ),
+                        title: Text(isLocked ? 'Unlock chat' : 'Lock chat'),
+                        onTap: () async {
+                          Navigator.of(sheetCtx).pop();
+                          if (isLocked) {
+                            final ok = await showPinDialog(context, PinDialogMode.verify, lockId);
+                            if (ok) await LockManager.removeLock(lockId);
+                          } else {
+                            final set = await showPinDialog(context, PinDialogMode.set, lockId);
+                            if (!set) return;
+                            await LockManager.lock(lockId);
+                          }
+                        },
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      );
+                    },
                   ),
                   if (isBlocked)
                     ListTile(
@@ -647,6 +657,20 @@ class _ChatsTabState extends State<ChatsTab> with TickerProviderStateMixin, Auto
             ],
           ),
         ),
+        PopupMenuItem<String>(
+          value: LockManager.isLocked('dm_${summary.otherUsername}') ? 'unlock' : 'lock',
+          child: Row(
+            children: [
+              Icon(
+                LockManager.isLocked('dm_${summary.otherUsername}') ? Icons.lock_open_rounded : Icons.lock_rounded,
+                size: 18,
+                color: colorScheme.onSurface,
+              ),
+              const SizedBox(width: 10),
+              Text(LockManager.isLocked('dm_${summary.otherUsername}') ? 'Unlock chat' : 'Lock chat'),
+            ],
+          ),
+        ),
         if (isBlocked)
           PopupMenuItem<String>(
             value: 'unblock',
@@ -680,7 +704,7 @@ class _ChatsTabState extends State<ChatsTab> with TickerProviderStateMixin, Auto
           ),
         ),
       ],
-    ).then((value) {
+    ).then((value) async {
       if (!context.mounted) return;
       if (value == 'mute') {
         MuteManager.mute(summary.otherUsername);
@@ -690,6 +714,15 @@ class _ChatsTabState extends State<ChatsTab> with TickerProviderStateMixin, Auto
         _showBlockConfirmationDialog(context, summary);
       } else if (value == 'unblock') {
         _showUnblockConfirmationDialog(context, summary);
+      } else if (value == 'lock') {
+        final lockId = 'dm_${summary.otherUsername}';
+        final set = await showPinDialog(context, PinDialogMode.set, lockId);
+        if (!set) return;
+        await LockManager.lock(lockId);
+      } else if (value == 'unlock') {
+        final lockId = 'dm_${summary.otherUsername}';
+        final ok = await showPinDialog(context, PinDialogMode.verify, lockId);
+        if (ok) await LockManager.removeLock(lockId);
       } else if (value == 'delete') {
         _showDeleteConfirmationDialog(context, summary);
       }
@@ -895,16 +928,15 @@ class _ChatsTabState extends State<ChatsTab> with TickerProviderStateMixin, Auto
               child: InkWell(
               borderRadius: BorderRadius.circular(16),
               onLongPress: () => _showChatActionsSheet(context, it),
-              onTap: () => widget.onOpenChat(it.otherUsername),
-              child: _glassCard(
-              context: context,
+              onTap: () => _openChatWithLockCheck(context, it.otherUsername),
+              child: AdaptiveGlassCard(
               child: Padding(
                 padding:
                     const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
                 child: Row(
                   children: [
                     GestureDetector(
-                      onTap: () => widget.onOpenChat(it.otherUsername),
+                      onTap: () => _openChatWithLockCheck(context, it.otherUsername),
                       onLongPress: () => _showUserProfileDialog(
                           it.otherUsername, it.displayName),
                       child: ValueListenableBuilder<int>(
@@ -926,7 +958,7 @@ class _ChatsTabState extends State<ChatsTab> with TickerProviderStateMixin, Auto
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           GestureDetector(
-                            onTap: () => widget.onOpenChat(it.otherUsername),
+                            onTap: () => _openChatWithLockCheck(context, it.otherUsername),
                             onLongPress: () => _showUserProfileDialog(
                                 it.otherUsername, it.displayName),
                             child: Text(
@@ -941,7 +973,7 @@ class _ChatsTabState extends State<ChatsTab> with TickerProviderStateMixin, Auto
                           ),
                           if (it.displayName != it.otherUsername)
                             GestureDetector(
-                              onTap: () => widget.onOpenChat(it.otherUsername),
+                              onTap: () => _openChatWithLockCheck(context, it.otherUsername),
                               onLongPress: () => _showUserProfileDialog(
                                   it.otherUsername, it.displayName),
                               child: Text(
@@ -977,44 +1009,62 @@ class _ChatsTabState extends State<ChatsTab> with TickerProviderStateMixin, Auto
                       ),
                     ),
                     ValueListenableBuilder<Set<String>>(
-                      valueListenable: MuteManager.mutedUsers,
-                      builder: (_, muted, __) {
-                        final isMuted = muted.contains(it.otherUsername);
-                        return Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            if (it.lastTs.millisecondsSinceEpoch > 0)
-                              Text(
-                                _formatTime(it.lastTs),
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: Theme.of(context)
-                                      .colorScheme
-                                      .onSurface
-                                      .withValues(alpha: 0.6),
-                                ),
-                              ),
-                            const SizedBox(height: 4),
-                            Row(
-                              mainAxisSize: MainAxisSize.min,
+                      valueListenable: LockManager.lockedChats,
+                      builder: (_, locked, __) {
+                        final isLocked = locked.contains('dm_${it.otherUsername}');
+                        return ValueListenableBuilder<Set<String>>(
+                          valueListenable: MuteManager.mutedUsers,
+                          builder: (_, muted, __) {
+                            final isMuted = muted.contains(it.otherUsername);
+                            return Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              crossAxisAlignment: CrossAxisAlignment.end,
                               children: [
-                                if (isMuted)
-                                  Padding(
-                                    padding: const EdgeInsets.only(right: 4),
-                                    child: Icon(
-                                      Icons.notifications_off_outlined,
-                                      size: 14,
+                                if (it.lastTs.millisecondsSinceEpoch > 0)
+                                  Text(
+                                    _formatTime(it.lastTs),
+                                    style: TextStyle(
+                                      fontSize: 12,
                                       color: Theme.of(context)
                                           .colorScheme
                                           .onSurface
-                                          .withValues(alpha: 0.4),
+                                          .withValues(alpha: 0.6),
                                     ),
                                   ),
-                                _UnreadBadge(chatId: it.chatId),
+                                const SizedBox(height: 4),
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    if (isLocked)
+                                      Padding(
+                                        padding: const EdgeInsets.only(right: 4),
+                                        child: Icon(
+                                          Icons.lock_rounded,
+                                          size: 14,
+                                          color: Theme.of(context)
+                                              .colorScheme
+                                              .onSurface
+                                              .withValues(alpha: 0.4),
+                                        ),
+                                      ),
+                                    if (isMuted)
+                                      Padding(
+                                        padding: const EdgeInsets.only(right: 4),
+                                        child: Icon(
+                                          Icons.notifications_off_outlined,
+                                          size: 14,
+                                          color: Theme.of(context)
+                                              .colorScheme
+                                              .onSurface
+                                              .withValues(alpha: 0.4),
+                                        ),
+                                      ),
+                                    _UnreadBadge(chatId: it.chatId),
+                                  ],
+                                ),
                               ],
-                            ),
-                          ],
+                            );
+                          },
                         );
                       },
                     ),

@@ -28,13 +28,16 @@ import 'screens/pin_code_screen.dart';
 import 'managers/decoy_manager.dart';
 import 'package:local_auth/local_auth.dart';
 import 'managers/settings_manager.dart';
+import 'managers/fallback_storage.dart';
 import 'managers/blocklist_manager.dart';
 import 'managers/mute_manager.dart';
+import 'managers/lock_manager.dart';
 import 'managers/account_manager.dart';
 import 'managers/secure_store.dart';
 import 'managers/onyx_tray_manager.dart';
 import 'models/app_themes.dart';
 import 'widgets/debug_overlay_v2.dart';
+import 'widgets/nearlink_bubble.dart';
 import 'widgets/vinyl_player_button.dart';
 import 'widgets/voice_channel_bar.dart';
 import 'voice/voice_channel_manager.dart';
@@ -51,6 +54,7 @@ import 'l10n/app_localizations.dart';
 import 'globals.dart';
 import 'utils/global_audio_controller.dart';
 import 'package:media_kit/media_kit.dart';
+import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 
 late File _logFile;
 final List<String> _logBuffer = [];
@@ -207,6 +211,7 @@ enum MediaProvider {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
+  await LiquidGlassWidgets.initialize();
 
   await _initLogFile();
 
@@ -232,6 +237,7 @@ void main() async {
   await SettingsManager.init();
   await BlocklistManager.init();
   await MuteManager.init();
+  await LockManager.init();
 
   await MediaCache.instance.init();
 
@@ -323,7 +329,7 @@ void main() async {
   appLog('' * 60);
   appLog('');
 
-  runApp(const MyApp());
+  runApp(LiquidGlassWidgets.wrap(child: const MyApp()));
 }
 
 void _initMediaNotificationListener() {
@@ -737,6 +743,7 @@ class _ElegantMessengerState extends State<ElegantMessenger> with WindowListener
                   child ?? const SizedBox.shrink(),
                   const CallOverlay(),
                   const VinylPlayerButton(),
+                  const NearLinkBubble(),
                   const _GlobalVoiceBar(),
                 ],
               ),
@@ -805,6 +812,9 @@ class _PinGateWidgetState extends State<_PinGateWidget> {
   void _lockApp() {
     wsConnectedNotifier.value = false;
     DecoyManager.deactivate();
+    FallbackStorage.main.lock();
+    FallbackStorage.decoy.lock();
+    MediaCache.instance.reset();
     if (mounted) setState(() => _unlocked = false);
   }
 
@@ -817,7 +827,15 @@ class _PinGateWidgetState extends State<_PinGateWidget> {
   Widget build(BuildContext context) {
     if (!_unlocked) {
       return PinCodeScreen.verify(
-        onSuccess: () => setState(() => _unlocked = true),
+        onSuccess: () {
+          MediaCache.instance.reset();
+          setState(() => _unlocked = true);
+          // RootScreen state is preserved by GlobalKey across lock/unlock —
+          // trigger a manual reload so chats appear without switching tabs.
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            rootScreenKey.currentState?.reloadAfterUnlock();
+          });
+        },
         onFakePin: _activateDecoy,
         onBiometric: SettingsManager.biometricEnabled.value ? _tryBiometric : null,
       );

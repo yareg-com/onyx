@@ -18,6 +18,81 @@ import '../globals.dart';
 import '../models/font_family.dart';
 import '../enums/delivery_mode.dart';
 
+/// A menu item for the desktop right-click context menu, with optional icon.
+class DesktopMenuItem {
+  final IconData? icon;
+  final String label;
+  final VoidCallback? onPressed;
+  final ContextMenuButtonType type;
+  final Color? color;
+
+  const DesktopMenuItem({
+    this.icon,
+    required this.label,
+    this.onPressed,
+    this.type = ContextMenuButtonType.custom,
+    this.color,
+  });
+}
+
+IconData? _standardIcon(ContextMenuButtonType type) => switch (type) {
+      ContextMenuButtonType.copy => Icons.content_copy_rounded,
+      ContextMenuButtonType.cut => Icons.content_cut_rounded,
+      ContextMenuButtonType.paste => Icons.content_paste_rounded,
+      ContextMenuButtonType.selectAll => Icons.select_all_rounded,
+      ContextMenuButtonType.delete => Icons.delete_outline_rounded,
+      _ => null,
+    };
+
+Widget _menuRow({
+  required IconData? icon,
+  required String label,
+  required VoidCallback? onPressed,
+  required ColorScheme cs,
+  Color? color,
+}) {
+  final c = color ?? cs.onSurface;
+  return InkWell(
+    onTap: onPressed,
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 22,
+            child: icon != null ? Icon(icon, size: 18, color: c) : null,
+          ),
+          const SizedBox(width: 10),
+          Text(label, style: TextStyle(fontSize: 14, color: c)),
+        ],
+      ),
+    ),
+  );
+}
+
+class _ContextMenuLayoutDelegate extends SingleChildLayoutDelegate {
+  const _ContextMenuLayoutDelegate(this.anchor);
+  final Offset anchor;
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
+      constraints.loosen();
+
+  @override
+  Offset getPositionForChild(Size size, Size childSize) {
+    double x = anchor.dx;
+    double y = anchor.dy;
+    if (x + childSize.width > size.width) x = size.width - childSize.width;
+    if (y + childSize.height > size.height) y = size.height - childSize.height;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    return Offset(x, y);
+  }
+
+  @override
+  bool shouldRelayout(_ContextMenuLayoutDelegate old) => old.anchor != anchor;
+}
+
 class MessageBubble extends StatelessWidget {
   final String text;
   final bool outgoing;
@@ -33,7 +108,7 @@ class MessageBubble extends StatelessWidget {
   final bool highlighted;
   final VoidCallback? onReplyTap;
 
-  final List<ContextMenuButtonItem>? desktopMenuItems;
+  final List<DesktopMenuItem>? desktopMenuItems;
   /// Called with the global tap position when the user right-clicks on desktop.
   /// When provided, the built-in SelectionArea context menu is suppressed and
   /// this callback is responsible for showing its own menu.
@@ -713,25 +788,57 @@ class MessageBubble extends StatelessWidget {
           }
           return SelectionArea(
             contextMenuBuilder: (BuildContext menuCtx, SelectableRegionState regionState) {
+              final anchors = regionState.contextMenuAnchors;
               final standard = regionState.contextMenuButtonItems;
-              final hasCopy = standard.any(
-                  (item) => item.type == ContextMenuButtonType.copy);
-              final extra = (desktopMenuItems ?? [])
-                  .where((item) => !(hasCopy && item.type == ContextMenuButtonType.copy))
-                  .map((item) => ContextMenuButtonItem(
-                        label: item.label,
-                        type: item.type,
-                        onPressed: item.onPressed == null
-                            ? null
-                            : () {
-                                ContextMenuController.removeAny();
-                                item.onPressed!();
-                              },
-                      ))
-                  .toList();
-              return AdaptiveTextSelectionToolbar.buttonItems(
-                anchors: regionState.contextMenuAnchors,
-                buttonItems: [...standard, ...extra],
+              final cs = Theme.of(menuCtx).colorScheme;
+              final hasCopy = (desktopMenuItems ?? [])
+                  .any((m) => m.type == ContextMenuButtonType.copy);
+
+              return CustomSingleChildLayout(
+                delegate: _ContextMenuLayoutDelegate(anchors.primaryAnchor),
+                child: Material(
+                  elevation: 8,
+                  borderRadius: BorderRadius.circular(12),
+                  color: cs.surfaceContainerHigh,
+                  child: IntrinsicWidth(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          for (final item in standard)
+                            if (item.type != ContextMenuButtonType.selectAll &&
+                                !(hasCopy && item.type == ContextMenuButtonType.copy))
+                              _menuRow(
+                                icon: _standardIcon(item.type),
+                                label: item.label ?? '',
+                                onPressed: item.onPressed == null
+                                    ? null
+                                    : () {
+                                        ContextMenuController.removeAny();
+                                        item.onPressed!();
+                                      },
+                                cs: cs,
+                              ),
+                          for (final item in desktopMenuItems ?? [])
+                            _menuRow(
+                              icon: item.icon,
+                              label: item.label,
+                              onPressed: item.onPressed == null
+                                  ? null
+                                  : () {
+                                      ContextMenuController.removeAny();
+                                      item.onPressed!();
+                                    },
+                              cs: cs,
+                              color: item.color,
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
               );
             },
             child: innerBubble,

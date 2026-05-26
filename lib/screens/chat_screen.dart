@@ -20,13 +20,17 @@ import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 import '../globals.dart';
 import 'forward_screen.dart';
-import '../widgets/adaptive_blur.dart';
+import 'dart:math' as math;
+import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
+import '../enums/liquid_glass_quality.dart';
+import '../widgets/chat_background_layer.dart';
 import '../models/chat_message.dart';
 import '../managers/account_manager.dart' hide UserInfo;
 import '../managers/settings_manager.dart';
 import '../managers/unread_manager.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/animated_message_bubble.dart';
+import '../widgets/chat_images_scope.dart';
 import '../widgets/video_message_widget.dart';
 import '../widgets/avatar_widget.dart';
 import '../call/call_manager.dart';
@@ -49,6 +53,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../l10n/app_localizations.dart';
 import '../managers/blocklist_manager.dart';
 import '../widgets/message_reaction_bar.dart';
+import '../widgets/swipeable_message_wrapper.dart';
 import '../widgets/media_picker_sheet.dart';
 import '../widgets/chat_input_bar.dart';
 
@@ -160,6 +165,21 @@ class ChatScreenState extends State<ChatScreen>
           (active: false, selected: {}));
   Map<String, ChatMessage> get _selectedMessages =>
       _selectionNotifier.value.selected;
+  final GlobalKey _messageListViewportKey = GlobalKey();
+  final Map<String, GlobalKey> _messageItemKeys = {};
+  List<String> _dragSelectionOrder = const [];
+  Map<String, ChatMessage> _dragSelectionLookup = const {};
+  Map<String, int> _dragSelectionIndices = const {};
+  bool _isDragSelectingMessages = false;
+  String? _dragSelectionAnchorKey;
+  String? _dragSelectionCurrentKey;
+  Map<String, ChatMessage> _dragSelectionBase = const {};
+  Offset _lastDragPointerGlobal = Offset.zero;
+  Timer? _dragAutoScrollTimer;
+  static const Duration _messageLongPressDuration =
+      Duration(milliseconds: 375);
+  static const double _dragEdgeZone = 80.0;
+  static const double _dragMaxSpeed = 14.0;
 
   final List<ChatMessage> _olderMessages = [];
   final List<UploadTask> _pendingUploads = [];
@@ -450,6 +470,136 @@ class ChatScreenState extends State<ChatScreen>
     }
   }
 
+  String _selectionKeyForMessage(ChatMessage msg) =>
+      '${msg.id}_${msg.serverMessageId ?? 'local'}_${msg.time.millisecondsSinceEpoch}';
+
+  GlobalKey _messageItemKey(String uniqueKey) =>
+      _messageItemKeys.putIfAbsent(uniqueKey, () => GlobalKey());
+
+  void _startMessageDragSelection(ChatMessage msg, String uniqueKey) {
+    final cur = _selectionNotifier.value;
+    final next = Map<String, ChatMessage>.from(cur.selected);
+    if (!cur.active) {
+      HapticFeedback.mediumImpact();
+    }
+    next[uniqueKey] = msg;
+    _selectionNotifier.value = (active: true, selected: next);
+    _dragSelectionBase = Map<String, ChatMessage>.from(cur.selected)
+      ..[uniqueKey] = msg;
+    _dragSelectionAnchorKey = uniqueKey;
+    _dragSelectionCurrentKey = uniqueKey;
+    _isDragSelectingMessages = true;
+    _selectMessageRangeTo(uniqueKey);
+  }
+
+  void _updateMessageDragSelection(Offset globalPosition) {
+    if (!_isDragSelectingMessages) return;
+    _lastDragPointerGlobal = globalPosition;
+    final hoveredKey = _messageKeyAtGlobal(globalPosition);
+    if (hoveredKey != null && hoveredKey != _dragSelectionCurrentKey) {
+      _selectMessageRangeTo(hoveredKey);
+    }
+    _updateDragAutoScroll();
+  }
+
+  void _endMessageDragSelection() {
+    _isDragSelectingMessages = false;
+    _dragSelectionAnchorKey = null;
+    _dragSelectionCurrentKey = null;
+    _dragSelectionBase = const {};
+    _stopDragAutoScroll();
+  }
+
+  void _selectMessageRangeTo(String uniqueKey) {
+    final anchorKey = _dragSelectionAnchorKey;
+    if (anchorKey == null) return;
+    final start = _dragSelectionIndices[anchorKey];
+    final end = _dragSelectionIndices[uniqueKey];
+    if (start == null || end == null) return;
+    final from = min(start, end);
+    final to = max(start, end);
+    final next = Map<String, ChatMessage>.from(_dragSelectionBase);
+    for (int i = from; i <= to; i++) {
+      final key = _dragSelectionOrder[i];
+      final msg = _dragSelectionLookup[key];
+      if (msg != null) next[key] = msg;
+    }
+    _dragSelectionCurrentKey = uniqueKey;
+    _selectionNotifier.value = (active: true, selected: next);
+  }
+
+  String? _messageKeyAtGlobal(Offset globalPosition) {
+    for (final uniqueKey in _dragSelectionOrder) {
+      final context = _messageItemKeys[uniqueKey]?.currentContext;
+      if (context == null) continue;
+      final box = context.findRenderObject() as RenderBox?;
+      if (box == null || !box.hasSize) continue;
+      final local = box.globalToLocal(globalPosition);
+      if (local.dx >= 0 &&
+          local.dy >= 0 &&
+          local.dx <= box.size.width &&
+          local.dy <= box.size.height) {
+        return uniqueKey;
+      }
+    }
+    return null;
+  }
+
+  void _updateDragAutoScroll() {
+    final box =
+        _messageListViewportKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final local = box.globalToLocal(_lastDragPointerGlobal);
+    final height = box.size.height;
+    final nearTop = local.dy < _dragEdgeZone;
+    final nearBottom = local.dy > height - _dragEdgeZone;
+    if (nearTop || nearBottom) {
+      _dragAutoScrollTimer ??= Timer.periodic(
+        const Duration(milliseconds: 16),
+        (_) => _handleDragAutoScrollTick(),
+      );
+    } else {
+      _stopDragAutoScroll();
+    }
+  }
+
+  void _handleDragAutoScrollTick() {
+    if (!_isDragSelectingMessages || !_scroll.hasClients) {
+      _stopDragAutoScroll();
+      return;
+    }
+    final box =
+        _messageListViewportKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final local = box.globalToLocal(_lastDragPointerGlobal);
+    final height = box.size.height;
+    double speed = 0;
+    if (local.dy < _dragEdgeZone) {
+      final depth =
+          ((_dragEdgeZone - local.dy) / _dragEdgeZone).clamp(0.0, 1.0);
+      speed = depth * _dragMaxSpeed;
+    } else if (local.dy > height - _dragEdgeZone) {
+      final depth = ((local.dy - (height - _dragEdgeZone)) / _dragEdgeZone)
+          .clamp(0.0, 1.0);
+      speed = -(depth * _dragMaxSpeed);
+    } else {
+      _stopDragAutoScroll();
+      return;
+    }
+    final newOffset =
+        (_scroll.offset + speed).clamp(0.0, _scroll.position.maxScrollExtent);
+    _scroll.jumpTo(newOffset);
+    final hoveredKey = _messageKeyAtGlobal(_lastDragPointerGlobal);
+    if (hoveredKey != null && hoveredKey != _dragSelectionCurrentKey) {
+      _selectMessageRangeTo(hoveredKey);
+    }
+  }
+
+  void _stopDragAutoScroll() {
+    _dragAutoScrollTimer?.cancel();
+    _dragAutoScrollTimer = null;
+  }
+
   void _copySelectedMessages() {
     final texts = _selectedMessages.values
         .where(_isTextMessage)
@@ -555,7 +705,7 @@ class ChatScreenState extends State<ChatScreen>
         onSave: isSaveable
             ? () {
                 Navigator.pop(ctx);
-                _saveMediaFromMessage(text);
+                _saveMediaFromMessage(text, l);
               }
             : null,
         onCopyImage: isImage
@@ -639,7 +789,7 @@ class ChatScreenState extends State<ChatScreen>
     });
   }
 
-  List<ContextMenuButtonItem>? _buildDesktopMenuItems(ChatMessage msg) {
+  List<DesktopMenuItem>? _buildDesktopMenuItems(ChatMessage msg) {
     if (!isDesktop) return null;
     final text = msg.content;
     if (text.startsWith('[cannot-decrypt')) return null;
@@ -657,7 +807,8 @@ class ChatScreenState extends State<ChatScreen>
         text.startsWith('MEDIA_PROXYv1:');
     final l = AppLocalizations.of(context);
     return [
-      ContextMenuButtonItem(
+      DesktopMenuItem(
+        icon: Icons.reply_rounded,
         label: l.reply,
         onPressed: () => _startReplyingToMessage({
           'id': msg.serverMessageId,
@@ -667,8 +818,9 @@ class ChatScreenState extends State<ChatScreen>
           'content': getPreviewText(msg.content),
         }),
       ),
-      ContextMenuButtonItem(
-        label: 'React',
+      DesktopMenuItem(
+        icon: Icons.add_reaction_outlined,
+        label: l.react,
         onPressed: () {
           final msgKey =
               '${msg.id}_${msg.serverMessageId ?? 'local'}_${msg.time.millisecondsSinceEpoch}';
@@ -681,18 +833,21 @@ class ChatScreenState extends State<ChatScreen>
         },
       ),
       if (isImage || isAlbum || isVideo || isVoice || isFile)
-        ContextMenuButtonItem(
-          label: 'Save',
-          onPressed: () => _saveMediaFromMessage(text),
+        DesktopMenuItem(
+          icon: Icons.save_alt_rounded,
+          label: l.save,
+          onPressed: () => _saveMediaFromMessage(text, l),
         ),
       if (isImage)
-        ContextMenuButtonItem(
-          label: 'Copy Image',
+        DesktopMenuItem(
+          icon: Icons.copy_all_rounded,
+          label: l.copyImage,
           onPressed: () => copyMessageImageToClipboard(
               text, (m) => rootScreenKey.currentState?.showSnack(m)),
         ),
       if (!isMedia)
-        ContextMenuButtonItem(
+        DesktopMenuItem(
+          icon: Icons.content_copy_rounded,
           label: l.copy,
           type: ContextMenuButtonType.copy,
           onPressed: () {
@@ -701,23 +856,28 @@ class ChatScreenState extends State<ChatScreen>
           },
         ),
       if (msg.canEditOrDelete && !isMedia)
-        ContextMenuButtonItem(
+        DesktopMenuItem(
+          icon: Icons.edit_rounded,
           label: l.edit,
           onPressed: () => _startEditingMessage(msg),
         ),
-      ContextMenuButtonItem(
-        label: _isMsgPinned(msg) ? 'Unpin' : 'Pin',
+      DesktopMenuItem(
+        icon: _isMsgPinned(msg) ? Icons.push_pin_outlined : Icons.push_pin_rounded,
+        label: _isMsgPinned(msg) ? l.unpin : l.pin,
         onPressed: () => _togglePin(msg),
       ),
       if (msg.outgoing)
-        ContextMenuButtonItem(
+        DesktopMenuItem(
+          icon: Icons.delete_outline_rounded,
           label: l.delete,
           type: ContextMenuButtonType.delete,
+          color: Colors.red.shade400,
           onPressed: () => _desktopDeleteMessage(msg),
         ),
       if (isFile)
-        ContextMenuButtonItem(
-          label: 'Show in file system',
+        DesktopMenuItem(
+          icon: Icons.folder_open_rounded,
+          label: l.showInFileSystem,
           onPressed: () {
             String filename = '';
             try {
@@ -733,7 +893,7 @@ class ChatScreenState extends State<ChatScreen>
                 filename.isNotEmpty ? mediaFilePathRegistry[filename] : null;
             if (localPath == null) {
               rootScreenKey.currentState
-                  ?.showSnack('File not loaded yet — open it first');
+                  ?.showSnack(l.fileNotLoadedOpenFirst);
               return;
             }
             revealInFileSystem(localPath);
@@ -742,9 +902,9 @@ class ChatScreenState extends State<ChatScreen>
     ];
   }
 
-  Future<void> _saveMediaFromMessage(String content) async {
+  Future<void> _saveMediaFromMessage(String content, AppLocalizations l) async {
     if (kIsWeb) {
-      rootScreenKey.currentState?.showSnack('Save not supported on web');
+      rootScreenKey.currentState?.showSnack(l.saveNotSupportedOnWeb);
       return;
     }
     try {
@@ -756,7 +916,7 @@ class ChatScreenState extends State<ChatScreen>
         if (filename.isEmpty) return;
         final cached = imageFileCache[filename];
         if (cached == null) {
-          rootScreenKey.currentState?.showSnack('Image not loaded yet');
+          rootScreenKey.currentState?.showSnack(l.imageNotLoadedYet);
           return;
         }
         await _saveFileToDevice(cached.file, p.basename(filename));
@@ -772,7 +932,7 @@ class ChatScreenState extends State<ChatScreen>
         if (filename.isEmpty) return;
         final localPath = mediaFilePathRegistry[filename];
         if (localPath == null) {
-          rootScreenKey.currentState?.showSnack('Voice not loaded yet');
+          rootScreenKey.currentState?.showSnack(l.voiceNotLoadedYet);
           return;
         }
         // "orig" may be a display label without extension (e.g. "Voice message");
@@ -794,7 +954,7 @@ class ChatScreenState extends State<ChatScreen>
         if (filename.isEmpty) return;
         final localPath = mediaFilePathRegistry[filename];
         if (localPath == null) {
-          rootScreenKey.currentState?.showSnack('Video not loaded yet');
+          rootScreenKey.currentState?.showSnack(l.videoNotLoadedYet);
           return;
         }
         await _saveFileToDevice(
@@ -817,7 +977,7 @@ class ChatScreenState extends State<ChatScreen>
         if (filename.isEmpty) return;
         final localPath = mediaFilePathRegistry[filename];
         if (localPath == null) {
-          rootScreenKey.currentState?.showSnack('File not loaded yet');
+          rootScreenKey.currentState?.showSnack(l.fileNotLoadedYet);
           return;
         }
         await _saveFileToDevice(
@@ -841,8 +1001,7 @@ class ChatScreenState extends State<ChatScreen>
               continue;
             }
             try {
-              final ok = await GallerySaver.saveImage(cached.file.path,
-                  albumName: 'ONYX');
+              final ok = await saveImageToGallery(cached.file.path);
               if (ok == true) {
                 saved++;
               } else {
@@ -904,6 +1063,7 @@ class ChatScreenState extends State<ChatScreen>
         final isImage = [
           '.jpg',
           '.jpeg',
+          '.jfif',
           '.png',
           '.gif',
           '.webp',
@@ -913,8 +1073,7 @@ class ChatScreenState extends State<ChatScreen>
         final isVideo =
             ['.mp4', '.mov', '.avi', '.webm', '.m4v', '.mkv'].contains(ext);
         if (isImage) {
-          final saved =
-              await GallerySaver.saveImage(file.path, albumName: 'ONYX');
+          final saved = await saveImageToGallery(file.path);
           rootScreenKey.currentState?.showSnack(
             saved == true ? 'Saved to gallery' : 'Failed to save to gallery',
           );
@@ -1353,6 +1512,7 @@ class ChatScreenState extends State<ChatScreen>
     _selectionNotifier.dispose();
     _textCtrl.dispose();
     _scroll.removeListener(_onScroll);
+    _stopDragAutoScroll();
     _scroll.dispose();
     _scrollDownVisible.dispose();
     _focusNode.dispose();
@@ -1813,8 +1973,8 @@ class ChatScreenState extends State<ChatScreen>
     }
     if (paths == null || paths.isEmpty) return;
 
-    if (paths.length > 1 && paths.every(FileTypeDetector.isImage)) {
-      await _sendAlbum(paths);
+    if (paths.length > 1) {
+      await _handleDroppedFiles(paths);
       return;
     }
 
@@ -2181,6 +2341,7 @@ class ChatScreenState extends State<ChatScreen>
 
   @override
   Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context);
     final me = rootScreenKey.currentState?.currentUsername ?? widget.myUsername;
     final List<String> ids = [me, widget.otherUsername]..sort();
     final String chatId = ids.join(':');
@@ -2391,13 +2552,13 @@ class ChatScreenState extends State<ChatScreen>
                       if (sel.selected.values.any(_isTextMessage))
                         IconButton(
                           icon: const Icon(Icons.copy_rounded),
-                          tooltip: 'Copy',
+                          tooltip: l.copy,
                           onPressed: _copySelectedMessages,
                         ),
                       if (sel.selected.isNotEmpty)
                         IconButton(
                           icon: const Icon(Icons.forward_rounded),
-                          tooltip: 'Forward',
+                          tooltip: l.forward,
                           onPressed: _forwardSelectedMessages,
                         ),
                       if (sel.selected.values.any((m) => m.outgoing))
@@ -2927,36 +3088,7 @@ class ChatScreenState extends State<ChatScreen>
         ),
         body: Stack(
           children: [
-            ValueListenableBuilder<String?>(
-              valueListenable: SettingsManager.chatBackground,
-              builder: (_, path, __) {
-                if (path == null) return const SizedBox.shrink();
-                final f = File(path);
-                if (!f.existsSync()) return const SizedBox.shrink();
-                return ValueListenableBuilder<bool>(
-                  valueListenable: SettingsManager.blurBackground,
-                  builder: (_, blur, __) {
-                    return ValueListenableBuilder<double>(
-                      valueListenable: SettingsManager.blurSigma,
-                      builder: (_, sigma, __) {
-                        final provider = FileImage(f);
-                        final child = blur
-                            ? AdaptiveBlur(
-                                imageProvider: provider,
-                                sigma: sigma,
-                                fit: BoxFit.cover)
-                            : Image(image: provider, fit: BoxFit.cover);
-                        return Positioned.fill(
-                          child: IgnorePointer(
-                            child: Opacity(opacity: 0.95, child: child),
-                          ),
-                        );
-                      },
-                    );
-                  },
-                );
-              },
-            ),
+            const ChatBackgroundLayer(),
             ValueListenableBuilder<int>(
               valueListenable: getChatMessageVersion(chatId),
               builder: (_, __, ___) {
@@ -3008,7 +3140,23 @@ class ChatScreenState extends State<ChatScreen>
                   }
                 }
 
-                return ValueListenableBuilder<bool>(
+                final dragMessages = items
+                    .whereType<_MessageItem>()
+                    .map((item) => item.message)
+                    .toList(growable: false);
+                _dragSelectionOrder = dragMessages
+                    .map(_selectionKeyForMessage)
+                    .toList(growable: false);
+                _dragSelectionLookup = {
+                  for (final msg in dragMessages) _selectionKeyForMessage(msg): msg,
+                };
+                _dragSelectionIndices = {
+                  for (int idx = 0; idx < _dragSelectionOrder.length; idx++)
+                    _dragSelectionOrder[idx]: idx,
+                };
+                return ChatImagesScope(
+                  allImages: ChatImagesScope.computeFromChatMessages(msgs),
+                  child: ValueListenableBuilder<bool>(
                   valueListenable: SettingsManager.showAvatarInChats,
                   builder: (_, showAvatar, __) {
                     return ValueListenableBuilder<bool>(
@@ -3019,6 +3167,7 @@ class ChatScreenState extends State<ChatScreen>
                               SettingsManager.alignAllMessagesRight,
                           builder: (_, alignRight, __) {
                             return Listener(
+                              key: _messageListViewportKey,
                               onPointerDown: (_) {
                                 if (!isDesktop) return;
                                 _suppressAutoRefocus = true;
@@ -3186,23 +3335,27 @@ class ChatScreenState extends State<ChatScreen>
                                                   size: 14, color: cs.onPrimary)
                                               : null,
                                         );
-                                        return RawGestureDetector(
+                                        return KeyedSubtree(
+                                          key: _messageItemKey(uniqueKey),
+                                          child: RawGestureDetector(
                                           behavior: HitTestBehavior.translucent,
                                           gestures: {
                                             LongPressGestureRecognizer:
                                                 GestureRecognizerFactoryWithHandlers<
                                                     LongPressGestureRecognizer>(
                                               () => LongPressGestureRecognizer(
-                                                  duration: const Duration(
-                                                      milliseconds: 250)),
+                                                  duration:
+                                                      _messageLongPressDuration),
                                               (instance) {
-                                                instance.onLongPress = sel
-                                                        .active
-                                                    ? () =>
-                                                        _toggleMessageSelection(
-                                                            msg, uniqueKey)
-                                                    : () => _enterSelectionMode(
+                                                instance.onLongPressStart = (_) =>
+                                                    _startMessageDragSelection(
                                                         msg, uniqueKey);
+                                                instance.onLongPressMoveUpdate =
+                                                    (details) =>
+                                                        _updateMessageDragSelection(
+                                                            details.globalPosition);
+                                                instance.onLongPressEnd = (_) =>
+                                                    _endMessageDragSelection();
                                               },
                                             ),
                                           },
@@ -3268,44 +3421,26 @@ class ChatScreenState extends State<ChatScreen>
                                                       !shouldShowRight)
                                                     checkmark,
                                                   Flexible(
-                                                    child: GestureDetector(
-                                                      onHorizontalDragEnd:
-                                                          isDesktop ||
-                                                                  sel.active
-                                                              ? null
-                                                              : (details) {
-                                                                  final v = details
-                                                                      .primaryVelocity;
-                                                                  if (v !=
-                                                                          null &&
-                                                                      v > 300) {
-                                                                    HapticFeedback
-                                                                        .selectionClick();
-                                                                    _showMessageMenu(
-                                                                        msg);
-                                                                  } else if (v !=
-                                                                          null &&
-                                                                      v < -300) {
-                                                                    final preview =
-                                                                        {
-                                                                      'id': msg
-                                                                          .serverMessageId,
-                                                                      'localId':
-                                                                          msg.id,
-                                                                      'sender':
-                                                                          msg.from,
-                                                                      'senderDisplayName':
-                                                                          msg.from,
-                                                                      'content':
-                                                                          getPreviewText(
-                                                                              msg.content),
-                                                                    };
-                                                                    _startReplyingToMessage(
-                                                                        preview);
-                                                                    HapticFeedback
-                                                                        .selectionClick();
-                                                                  }
-                                                                },
+                                                    child: SwipeableMessageWrapper(
+                                                      disabled: sel.active,
+                                                      onSwipeRight: () =>
+                                                          _showMessageMenu(msg),
+                                                      onSwipeLeft: () {
+                                                        final preview = {
+                                                          'id': msg
+                                                              .serverMessageId,
+                                                          'localId': msg.id,
+                                                          'sender': msg.from,
+                                                          'senderDisplayName':
+                                                              msg.from,
+                                                          'content':
+                                                              getPreviewText(
+                                                                  msg.content),
+                                                        };
+                                                        _startReplyingToMessage(
+                                                            preview);
+                                                      },
+                                                      child: GestureDetector(
                                                       onSecondaryTap: isDesktop &&
                                                               !sel.active
                                                           ? () =>
@@ -3372,6 +3507,7 @@ class ChatScreenState extends State<ChatScreen>
                                                         ],
                                                       ),
                                                     ),
+                                                    ),
                                                   ),
                                                   if (sel.active &&
                                                       shouldShowRight)
@@ -3380,6 +3516,7 @@ class ChatScreenState extends State<ChatScreen>
                                               ),
                                             ),
                                           ),
+                                        ),
                                         );
                                       },
                                     );
@@ -3394,6 +3531,7 @@ class ChatScreenState extends State<ChatScreen>
                       },
                     );
                   },
+                ),
                 );
               },
             ),
@@ -3752,10 +3890,21 @@ class ChatScreenState extends State<ChatScreen>
                                   ),
                                 );
                               },
-                              child: ValueListenableBuilder<double>(
-                                valueListenable:
-                                    SettingsManager.elementBrightness,
-                                builder: (_, brightness, ___) {
+                              child: ListenableBuilder(
+                                listenable: Listenable.merge([
+                                  SettingsManager.elementBrightness,
+                                  SettingsManager.liquidGlassOnInput,
+                                  SettingsManager.liquidGlassInputQuality,
+                                  SettingsManager.liquidGlassInputBlur,
+                                  SettingsManager.liquidGlassInputTint,
+                                  SettingsManager.liquidGlassInputSaturation,
+                                  SettingsManager.liquidGlassInputChromatic,
+                                  SettingsManager.liquidGlassInputRefractive,
+                                  SettingsManager.liquidGlassInputLightIntensity,
+                                  SettingsManager.liquidGlassInputThickness,
+                                ]),
+                                builder: (_, __) {
+                                  final brightness = SettingsManager.elementBrightness.value;
                                   final baseColor =
                                       SettingsManager.getElementColor(
                                     Theme.of(context)
@@ -3767,7 +3916,12 @@ class ChatScreenState extends State<ChatScreen>
                                       .colorScheme
                                       .outlineVariant
                                       .withValues(alpha: 0.15);
-                                  return ConstrainedBox(
+                                  final isMobile = !Platform.isWindows &&
+                                      !Platform.isMacOS &&
+                                      !Platform.isLinux;
+                                  final useGlass = isMobile &&
+                                      SettingsManager.liquidGlassOnInput.value;
+                                  final bar = ConstrainedBox(
                                     constraints: BoxConstraints(maxWidth: width),
                                     child: ChatInputBar(
                                       controller: _textCtrl,
@@ -3812,9 +3966,10 @@ class ChatScreenState extends State<ChatScreen>
                                       onChanged: (_) => _onUserTyping(),
                                       hintText: AppLocalizations.of(context)
                                           .localizeHint(_inputHint),
-                                      backgroundColor: baseColor,
-                                      opacity: opacity,
-                                      borderColor: borderColor,
+                                      backgroundColor: useGlass ? Colors.white : baseColor,
+                                      opacity: useGlass ? 0.0 : opacity,
+                                      borderColor: useGlass ? Colors.transparent : borderColor,
+                                      glassMode: useGlass,
                                       sendIcon: _isLANMode
                                           ? Icons.router
                                           : Icons.send,
@@ -3871,6 +4026,44 @@ class ChatScreenState extends State<ChatScreen>
                                       ),
                                     ),
                                   );
+                                  if (!useGlass) return bar;
+                                  final quality = SettingsManager.liquidGlassInputQuality.value;
+                                  final blur           = SettingsManager.liquidGlassInputBlur.value;
+                                  final tint           = SettingsManager.liquidGlassInputTint.value;
+                                  final saturation     = SettingsManager.liquidGlassInputSaturation.value;
+                                  final chromatic      = SettingsManager.liquidGlassInputChromatic.value;
+                                  final refractive     = SettingsManager.liquidGlassInputRefractive.value;
+                                  final lightIntensity = SettingsManager.liquidGlassInputLightIntensity.value;
+                                  final thickness      = SettingsManager.liquidGlassInputThickness.value;
+                                  final glassQuality = switch (quality) {
+                                    LiquidGlassQuality.fast    => GlassQuality.standard,
+                                    LiquidGlassQuality.medium  => GlassQuality.minimal,
+                                    LiquidGlassQuality.quality => GlassQuality.premium,
+                                  };
+                                  final isDark = Theme.of(context).brightness == Brightness.dark;
+                                  final tintColor = isDark
+                                      ? Colors.white.withValues(alpha: tint)
+                                      : Colors.black.withValues(alpha: tint);
+                                  final settings = LiquidGlassSettings(
+                                    thickness: thickness,
+                                    blur: blur,
+                                    chromaticAberration: chromatic,
+                                    lightIntensity: lightIntensity,
+                                    refractiveIndex: refractive,
+                                    saturation: saturation,
+                                    ambientStrength: 0.8,
+                                    lightAngle: 0.75 * math.pi,
+                                    glassColor: tintColor,
+                                  );
+                                  return GlassCard(
+                                    useOwnLayer: true,
+                                    settings: settings,
+                                    quality: glassQuality,
+                                    padding: EdgeInsets.zero,
+                                    shape: LiquidRoundedRectangle(borderRadius: 24),
+                                    clipBehavior: Clip.antiAlias,
+                                    child: bar,
+                                  );
                                 },
                               ),
                             ),
@@ -3891,36 +4084,90 @@ class ChatScreenState extends State<ChatScreen>
   Future<void> _handleDroppedFiles(List<String> filePaths) async {
     if (filePaths.isEmpty) return;
 
-    if (filePaths.length > 1 && filePaths.every(FileTypeDetector.isImage)) {
-      await _sendAlbum(filePaths);
+    // Single file — preserve dialog/confirm behavior
+    if (filePaths.length == 1) {
+      final filePath = filePaths.first;
+      final file = File(filePath);
+      if (!await file.exists()) {
+        rootScreenKey.currentState?.showSnack(
+            AppLocalizations(SettingsManager.appLocale.value).fileNotFound);
+        return;
+      }
+      final basename = p.basename(filePath);
+      final ext = p.extension(basename).toLowerCase();
+      if (FileTypeDetector.isImage(filePath)) {
+        _showFilePreviewAndSend(filePath, basename, ext, 'IMAGE');
+      } else if (FileTypeDetector.isVideo(filePath)) {
+        _showFilePreviewAndSend(filePath, basename, ext, 'VIDEO');
+      } else if (FileTypeDetector.isAudio(filePath)) {
+        _showFilePreviewAndSend(filePath, basename, ext, 'AUDIO');
+      } else if (FileTypeDetector.isDocument(filePath)) {
+        _showFilePreviewAndSend(filePath, basename, ext, 'DOCUMENT');
+      } else if (FileTypeDetector.isCompress(filePath)) {
+        _showFilePreviewAndSend(filePath, basename, ext, 'ARCHIVE');
+      } else if (FileTypeDetector.isData(filePath)) {
+        _showFilePreviewAndSend(filePath, basename, ext, 'DATA');
+      } else {
+        _showFilePreviewAndSend(filePath, basename, ext, 'FILE');
+      }
       return;
     }
 
-    final filePath = filePaths.first;
-    final file = File(filePath);
-    if (!await file.exists()) {
-      rootScreenKey.currentState?.showSnack(
-          AppLocalizations(SettingsManager.appLocale.value).fileNotFound);
-      return;
+    // Multiple files — filter existing, then process all in order
+    final existing = <String>[];
+    for (final fp in filePaths) {
+      if (await File(fp).exists()) {
+        existing.add(fp);
+      } else {
+        rootScreenKey.currentState?.showSnack(
+            AppLocalizations(SettingsManager.appLocale.value).fileNotFound);
+      }
     }
+    if (existing.isEmpty) return;
 
-    final basename = p.basename(filePath);
-    final ext = p.extension(basename).toLowerCase();
-
-    if (FileTypeDetector.isImage(filePath)) {
-      _showFilePreviewAndSend(filePath, basename, ext, 'IMAGE');
-    } else if (FileTypeDetector.isVideo(filePath)) {
-      _showFilePreviewAndSend(filePath, basename, ext, 'VIDEO');
-    } else if (FileTypeDetector.isAudio(filePath)) {
-      _showFilePreviewAndSend(filePath, basename, ext, 'AUDIO');
-    } else if (FileTypeDetector.isDocument(filePath)) {
-      _showFilePreviewAndSend(filePath, basename, ext, 'DOCUMENT');
-    } else if (FileTypeDetector.isCompress(filePath)) {
-      _showFilePreviewAndSend(filePath, basename, ext, 'ARCHIVE');
-    } else if (FileTypeDetector.isData(filePath)) {
-      _showFilePreviewAndSend(filePath, basename, ext, 'DATA');
-    } else {
-      _showFilePreviewAndSend(filePath, basename, ext, 'FILE');
+    // Batch consecutive images (≤10 per album message), send all others individually.
+    // Each album batch shows its own confirmation dialog (one dialog per 10 images).
+    int i = 0;
+    while (i < existing.length) {
+      final fp = existing[i];
+      if (FileTypeDetector.isImage(fp)) {
+        final batch = <String>[];
+        while (i < existing.length &&
+            FileTypeDetector.isImage(existing[i]) &&
+            batch.length < 10) {
+          batch.add(existing[i]);
+          i++;
+        }
+        await _sendAlbum(batch); // shows album dialog per batch if setting enabled
+      } else {
+        if (!mounted) return;
+        final basename = p.basename(fp);
+        final ext = p.extension(basename).toLowerCase();
+        final fileType = FileTypeDetector.isVideo(fp)
+            ? 'VIDEO'
+            : FileTypeDetector.isAudio(fp)
+                ? 'AUDIO'
+                : FileTypeDetector.isDocument(fp)
+                    ? 'DOCUMENT'
+                    : FileTypeDetector.isCompress(fp)
+                        ? 'ARCHIVE'
+                        : FileTypeDetector.isData(fp)
+                            ? 'DATA'
+                            : 'FILE';
+        var proceed = false;
+        await showDialog<void>(
+          context: context,
+          builder: (_) => FilePreviewDialog(
+            filePath: fp,
+            onSend: () => proceed = true,
+            onCancel: () {},
+            onPasteExtra: null,
+            onSendAlbum: null,
+          ),
+        );
+        if (proceed) await _sendFile(fp, basename, ext, fileType);
+        i++;
+      }
     }
   }
 
@@ -4701,16 +4948,15 @@ class ChatScreenState extends State<ChatScreen>
 
   Future<void> _sendAlbum(List<String> filePaths,
       {bool skipConfirm = false}) async {
-    final limited = filePaths.take(10).toList();
-    if (limited.isEmpty) return;
+    if (filePaths.isEmpty) return;
 
-    if (!skipConfirm && SettingsManager.confirmFileUpload.value) {
+    if (!skipConfirm) {
       if (!mounted) return;
       var proceed = false;
       await showDialog<void>(
         context: context,
         builder: (_) => AlbumPreviewDialog(
-          filePaths: limited,
+          filePaths: filePaths,
           onSend: () => proceed = true,
           onCancel: () {},
         ),
@@ -4728,7 +4974,7 @@ class ChatScreenState extends State<ChatScreen>
       }
 
       final ok = await (rootScreenKey.currentState?.checkQuotaAndPrompt(
-            limitMb: 10.0 * limited.length,
+            limitMb: 10.0 * filePaths.length,
             includeImageCache: false,
           ) ??
           Future.value(true));
@@ -4736,7 +4982,7 @@ class ChatScreenState extends State<ChatScreen>
 
       rootScreenKey.currentState?.showSnack(
           AppLocalizations(SettingsManager.appLocale.value)
-              .uploadingImages(limited.length));
+              .uploadingImages(filePaths.length));
 
       final appSupport = await getApplicationSupportDirectory();
       final cacheDir = Directory('${appSupport.path}/image_cache');
@@ -4744,7 +4990,7 @@ class ChatScreenState extends State<ChatScreen>
 
       final albumItems = <Map<String, String>>[];
 
-      for (final filePath in limited) {
+      for (final filePath in filePaths) {
         final localFile = File(filePath);
         if (!await localFile.exists()) continue;
 
@@ -5003,20 +5249,21 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l = AppLocalizations.of(context);
 
     final canAct = widget.canEditDelete && _secondsLeft != 0;
 
     String editLabel() {
-      if (!canAct) return 'Edit';
-      if (_secondsLeft > 0) return 'Edit  ·  ${_secondsLeft}s';
-      return 'Edit';
+      if (!canAct) return l.edit;
+      if (_secondsLeft > 0) return l.editTimerLabel(_secondsLeft);
+      return l.edit;
     }
 
     String deleteLabel() {
-      if (widget.canAlwaysDelete) return 'Delete';
-      if (!canAct) return 'Delete';
-      if (_secondsLeft > 0) return 'Delete  ·  ${_secondsLeft}s';
-      return 'Delete';
+      if (widget.canAlwaysDelete) return l.delete;
+      if (!canAct) return l.delete;
+      if (_secondsLeft > 0) return l.deleteTimerLabel(_secondsLeft);
+      return l.delete;
     }
 
     Widget actionTile(IconData icon, String label, VoidCallback? onTap,
@@ -5067,21 +5314,23 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
                   ),
                 ),
                 const SizedBox(height: 8),
-                actionTile(Icons.reply_rounded, 'Reply', widget.onReply),
+                actionTile(Icons.reply_rounded, l.reply, widget.onReply),
                 actionTile(
-                    Icons.add_reaction_outlined, 'React', widget.onReact),
+                    Icons.add_reaction_outlined, l.react, widget.onReact),
                 actionTile(
                   widget.isPinned
                       ? Icons.push_pin_outlined
                       : Icons.push_pin_rounded,
-                  widget.isPinned ? 'Unpin' : 'Pin',
+                  widget.isPinned ? l.unpin : l.pin,
                   widget.onPin,
                 ),
                 if (widget.onSave != null)
-                  actionTile(Icons.save_alt_rounded, 'Save', widget.onSave),
-                if (widget.onCopyImage != null)
+                  actionTile(Icons.save_alt_rounded, l.save, widget.onSave),
+                if (widget.onCopyImage != null &&
+                    !Platform.isAndroid &&
+                    !Platform.isIOS)
                   actionTile(
-                      Icons.copy_all_rounded, 'Copy Image', widget.onCopyImage),
+                      Icons.copy_all_rounded, l.copyImage, widget.onCopyImage),
                 if (widget.msg.outgoing && !widget.isMedia)
                   actionTile(
                     Icons.edit_rounded,
@@ -5089,7 +5338,7 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
                     canAct ? widget.onEdit : null,
                   ),
                 if (!widget.isMedia)
-                  actionTile(Icons.copy_rounded, 'Copy', widget.onCopy),
+                  actionTile(Icons.copy_rounded, l.copy, widget.onCopy),
                 if (widget.msg.outgoing && widget.onDelete != null)
                   actionTile(
                     Icons.delete_outline_rounded,

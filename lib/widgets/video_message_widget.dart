@@ -207,6 +207,13 @@ class _VideoMessageWidgetState extends State<VideoMessageWidget>
         if (!(await cachedFile.exists())) {
           throw Exception('LAN file not found: $lanFilename');
         }
+      } else if (widget.filename.startsWith('fav://')) {
+        final favFilename = widget.filename.substring(6);
+        final appDocuments = await getApplicationDocumentsDirectory();
+        cachedFile = File('${appDocuments.path}/fav_media/$favFilename');
+        if (!(await cachedFile.exists())) {
+          throw Exception('Favorites file not found: $favFilename');
+        }
       } else if (widget.filename.startsWith('http')) {
         var url = widget.filename;
         final safeName =
@@ -463,12 +470,11 @@ class _VideoMessageWidgetState extends State<VideoMessageWidget>
 
   @override
   void dispose() {
-    // Cancel our listener but DO NOT dispose the player —
-    // it lives in _globalPlayerCache and will be reused when the user
-    // navigates back to this chat.
     _videoParamsSub?.cancel();
     _videoParamsSub = null;
-    // Just drop local references; the cache keeps the player alive.
+    // Pause before releasing — player stays alive in cache but shouldn't play
+    // when the user has navigated away from the chat.
+    _player?.pause();
     _player = null;
     _videoController = null;
     super.dispose();
@@ -645,6 +651,7 @@ class _VideoMessageWidgetState extends State<VideoMessageWidget>
             // No setPreferredOrientations call → system auto-rotate stays active
           },
           onExitFullscreen: () async {
+            _player?.pause();
             await SystemChrome.setEnabledSystemUIMode(
               SystemUiMode.manual,
               overlays: SystemUiOverlay.values,

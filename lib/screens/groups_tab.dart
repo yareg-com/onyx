@@ -14,6 +14,9 @@ import 'external_group_chat_screen.dart';
 import '../l10n/app_localizations.dart';
 import '../managers/decoy_manager.dart';
 import '../managers/decoy_data_manager.dart';
+import '../widgets/adaptive_glass_card.dart';
+import '../managers/lock_manager.dart';
+import '../dialogs/pin_lock_dialog.dart';
 
 List<Group> _parseGroupsJsonInBackground(Map<String, String?> params) {
   final jsonBody = params['jsonBody'] ?? '[]';
@@ -43,39 +46,6 @@ List<Group> _parseGroupsJsonInBackground(Map<String, String?> params) {
     }).toList();
   }
   return groups;
-}
-
-Widget _glassCard({required BuildContext context, required Widget child}) {
-  final colorScheme = Theme.of(context).colorScheme;
-  return ValueListenableBuilder<double>(
-    valueListenable: SettingsManager.elementOpacity,
-    builder: (_, opacity, __) {
-      return ValueListenableBuilder<double>(
-        valueListenable: SettingsManager.elementBrightness,
-        builder: (_, brightness, __) {
-          final baseColor = SettingsManager.getElementColor(
-            colorScheme.surfaceContainerHighest,
-            brightness,
-          );
-          return ClipRRect(
-            borderRadius: BorderRadius.circular(16),
-            child: Container(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-              decoration: BoxDecoration(
-                color: baseColor.withValues(alpha: opacity),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(
-                  color: colorScheme.outlineVariant.withValues(alpha: 0.15),
-                  width: 1.0,
-                ),
-              ),
-              child: child,
-            ),
-          );
-        },
-      );
-    },
-  );
 }
 
 class GroupsTab extends StatefulWidget {
@@ -707,6 +677,168 @@ class _GroupsTabState extends State<GroupsTab>
     );
   }
 
+  String _lockId(Group g) => g.isExternal
+      ? 'eg_${g.externalServerId}_${g.id}'
+      : 'ng_${g.id}';
+
+  Future<void> _openGroupWithLockCheck(BuildContext ctx, Group g) async {
+    final lockId = _lockId(g);
+    if (!LockManager.isLocked(lockId)) {
+      _doOpenGroup(ctx, g);
+      return;
+    }
+    final ok = await showPinDialog(ctx, PinDialogMode.verify, lockId);
+    if (ok && mounted) {
+      _doOpenGroup(ctx, g);
+    }
+  }
+
+  void _doOpenGroup(BuildContext ctx, Group g) {
+    if (g.isExternal) {
+      if (isDesktop) {
+        widget.onOpenGroup(g);
+      } else {
+        _openExternalGroup(g);
+      }
+    } else if (isDesktop) {
+      rootScreenKey.currentState?.setState(() {
+        rootScreenKey.currentState?.selectedGroup = g;
+        rootScreenKey.currentState?.selectedChatOther = null;
+      });
+    } else {
+      widget.onOpenGroup(g);
+    }
+  }
+
+  void _showGroupActionsSheet(BuildContext context, Group g) {
+    final colorScheme = Theme.of(context).colorScheme;
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (sheetCtx) => ValueListenableBuilder<double>(
+        valueListenable: SettingsManager.elementBrightness,
+        builder: (_, brightness, __) {
+          final sheetColor = SettingsManager.getElementColor(
+              colorScheme.surfaceContainerHighest, brightness);
+          return ValueListenableBuilder<Set<String>>(
+            valueListenable: LockManager.lockedChats,
+            builder: (_, locked, __) {
+              final lockId = _lockId(g);
+              final isLocked = locked.contains(lockId);
+              return SafeArea(
+                child: Container(
+                  margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                  decoration: BoxDecoration(
+                    color: sheetColor,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const SizedBox(height: 8),
+                      Container(
+                        width: 36,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: colorScheme.onSurface.withValues(alpha: 0.2),
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      ListTile(
+                        leading: Icon(
+                          isLocked ? Icons.lock_open_rounded : Icons.lock_rounded,
+                          color: colorScheme.onSurface,
+                        ),
+                        title: Text(isLocked ? 'Unlock' : 'Lock'),
+                        onTap: () async {
+                          Navigator.of(sheetCtx).pop();
+                          if (isLocked) {
+                            final ok = await showPinDialog(context, PinDialogMode.verify, lockId);
+                            if (ok) await LockManager.removeLock(lockId);
+                          } else {
+                            final set = await showPinDialog(context, PinDialogMode.set, lockId);
+                            if (!set) return;
+                            await LockManager.lock(lockId);
+                          }
+                        },
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      ListTile(
+                        leading: Icon(Icons.delete_outline, color: colorScheme.error),
+                        title: Text(g.isExternal ? 'Remove server' : 'Leave group'),
+                        onTap: () {
+                          Navigator.of(sheetCtx).pop();
+                          if (g.isExternal) {
+                            _showRemoveExternalServerConfirmation(context, g);
+                          } else {
+                            _showLeaveGroupConfirmation(context, g);
+                          }
+                        },
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      const SizedBox(height: 4),
+                    ],
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+
+  void _showGroupDesktopContextMenu(
+      BuildContext context, Offset globalPosition, Group g) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final isLocked = LockManager.isLocked(_lockId(g));
+    showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        globalPosition.dx, globalPosition.dy,
+        globalPosition.dx, globalPosition.dy,
+      ),
+      items: [
+        PopupMenuItem<String>(
+          value: isLocked ? 'unlock' : 'lock',
+          child: Row(children: [
+            Icon(isLocked ? Icons.lock_open_rounded : Icons.lock_rounded,
+                size: 18, color: colorScheme.onSurface),
+            const SizedBox(width: 10),
+            Text(isLocked ? 'Unlock' : 'Lock'),
+          ]),
+        ),
+        PopupMenuItem<String>(
+          value: 'delete',
+          child: Row(children: [
+            Icon(Icons.delete_outline, size: 18, color: colorScheme.error),
+            const SizedBox(width: 10),
+            Text(g.isExternal ? 'Remove server' : 'Leave group',
+                style: TextStyle(color: colorScheme.error)),
+          ]),
+        ),
+      ],
+    ).then((value) async {
+      if (!context.mounted) return;
+      final lockId = _lockId(g);
+      if (value == 'lock') {
+        final set = await showPinDialog(context, PinDialogMode.set, lockId);
+        if (!set) return;
+        await LockManager.lock(lockId);
+      } else if (value == 'unlock') {
+        final ok = await showPinDialog(context, PinDialogMode.verify, lockId);
+        if (ok) await LockManager.removeLock(lockId);
+      } else if (value == 'delete') {
+        if (g.isExternal) {
+          _showRemoveExternalServerConfirmation(context, g);
+        } else {
+          _showLeaveGroupConfirmation(context, g);
+        }
+      }
+    });
+  }
+
   void _showLeaveGroupConfirmation(BuildContext context, Group group) {
     showDialog(
       context: context,
@@ -723,6 +855,7 @@ class _GroupsTabState extends State<GroupsTab>
           TextButton(
             onPressed: () {
               Navigator.of(context).pop();
+              LockManager.removeLock('ng_${group.id}');
               _leaveGroup(group.id);
             },
             child: Text(
@@ -757,6 +890,10 @@ class _GroupsTabState extends State<GroupsTab>
             onPressed: () async {
               Navigator.of(context).pop();
               if (group.externalServerId != null) {
+                for (final g in _groups.where(
+                    (g) => g.externalServerId == group.externalServerId)) {
+                  LockManager.removeLock('eg_${g.externalServerId}_${g.id}');
+                }
                 await ExternalServerManager.removeServer(
                     group.externalServerId!);
                 if (mounted) {
@@ -834,36 +971,21 @@ class _GroupsTabState extends State<GroupsTab>
                           itemBuilder: (context, i) {
                             if (i == 0) {
                               final colorScheme = Theme.of(context).colorScheme;
-                              return ClipRRect(
-                                borderRadius: BorderRadius.circular(14),
+                              return AdaptiveGlassCard(
+                                borderRadius: 14,
+                                padding: EdgeInsets.zero,
+                                onTap: _showAddGroupSheet,
                                 child: Container(
+                                  height: 44,
+                                  alignment: Alignment.center,
                                   decoration: BoxDecoration(
-                                    color: colorScheme.surfaceVariant
-                                        .withOpacity(0.5),
+                                    color: colorScheme.primary.withValues(alpha: 0.12),
                                     borderRadius: BorderRadius.circular(14),
-                                    border: Border.all(
-                                      color: colorScheme.outlineVariant
-                                          .withOpacity(0.15),
-                                      width: 0.8,
-                                    ),
                                   ),
-                                  child: InkWell(
-                                    borderRadius: BorderRadius.circular(14),
-                                    onTap: _showAddGroupSheet,
-                                    child: Container(
-                                      height: 44,
-                                      alignment: Alignment.center,
-                                      decoration: BoxDecoration(
-                                        color: colorScheme.primary
-                                            .withOpacity(0.12),
-                                        borderRadius: BorderRadius.circular(14),
-                                      ),
-                                      child: Icon(
-                                        Icons.add,
-                                        size: 20,
-                                        color: colorScheme.primary,
-                                      ),
-                                    ),
+                                  child: Icon(
+                                    Icons.add,
+                                    size: 20,
+                                    color: colorScheme.primary,
                                   ),
                                 ),
                               );
@@ -886,36 +1008,15 @@ class _GroupsTabState extends State<GroupsTab>
                             }
 
                             return RepaintBoundary(
-                              child: InkWell(
+                              child: GestureDetector(
+                                onSecondaryTapUp: isDesktop
+                                    ? (d) => _showGroupDesktopContextMenu(context, d.globalPosition, g)
+                                    : null,
+                                child: InkWell(
                                 borderRadius: BorderRadius.circular(16),
-                                onTap: () {
-                                  if (g.isExternal) {
-                                    if (isDesktop) {
-                                      widget.onOpenGroup(g);
-                                    } else {
-                                      _openExternalGroup(g);
-                                    }
-                                  } else if (isDesktop) {
-                                    rootScreenKey.currentState?.setState(() {
-                                      rootScreenKey
-                                          .currentState?.selectedGroup = g;
-                                      rootScreenKey.currentState
-                                          ?.selectedChatOther = null;
-                                    });
-                                  } else {
-                                    widget.onOpenGroup(g);
-                                  }
-                                },
-                                onLongPress: () {
-                                  if (g.isExternal) {
-                                    _showRemoveExternalServerConfirmation(
-                                        context, g);
-                                  } else {
-                                    _showLeaveGroupConfirmation(context, g);
-                                  }
-                                },
-                                child: _glassCard(
-                                  context: context,
+                                onTap: () => _openGroupWithLockCheck(context, g),
+                                onLongPress: () => _showGroupActionsSheet(context, g),
+                                child: AdaptiveGlassCard(
                                   child: Padding(
                                     padding: const EdgeInsets.symmetric(
                                         vertical: 8, horizontal: 10),
@@ -1009,23 +1110,45 @@ class _GroupsTabState extends State<GroupsTab>
                                             ],
                                           ),
                                         ),
-                                        Align(
-                                          alignment: Alignment.topRight,
-                                          child: Icon(
-                                            g.isChannel
-                                                ? Icons.ondemand_video_outlined
-                                                : Icons.group_outlined,
-                                            size: 16,
-                                            color: Theme.of(context)
-                                                .colorScheme
-                                                .onSurface
-                                                .withOpacity(0.6),
-                                          ),
+                                        ValueListenableBuilder<Set<String>>(
+                                          valueListenable: LockManager.lockedChats,
+                                          builder: (_, locked, __) {
+                                            final isLocked = locked.contains(_lockId(g));
+                                            return Column(
+                                              mainAxisSize: MainAxisSize.min,
+                                              crossAxisAlignment: CrossAxisAlignment.end,
+                                              children: [
+                                                Icon(
+                                                  g.isChannel
+                                                      ? Icons.ondemand_video_outlined
+                                                      : Icons.group_outlined,
+                                                  size: 16,
+                                                  color: Theme.of(context)
+                                                      .colorScheme
+                                                      .onSurface
+                                                      .withValues(alpha: 0.6),
+                                                ),
+                                                if (isLocked)
+                                                  Padding(
+                                                    padding: const EdgeInsets.only(top: 4),
+                                                    child: Icon(
+                                                      Icons.lock_rounded,
+                                                      size: 14,
+                                                      color: Theme.of(context)
+                                                          .colorScheme
+                                                          .onSurface
+                                                          .withValues(alpha: 0.4),
+                                                    ),
+                                                  ),
+                                              ],
+                                            );
+                                          },
                                         ),
                                       ],
                                     ),
                                   ),
                                 ),
+                              ),
                               ),
                             );
                           },

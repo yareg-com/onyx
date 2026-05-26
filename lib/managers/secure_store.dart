@@ -6,9 +6,10 @@ import 'fallback_storage.dart';
 
 class SecureStore {
   static const _keychain = FlutterSecureStorage();
-  static final _fallback = FallbackStorage();
+  static final _fallback = FallbackStorage.main;
 
-  static bool get _useFallback => !kIsWeb && Platform.isMacOS;
+  static bool get _useFallback =>
+      !kIsWeb && (Platform.isMacOS || Platform.isWindows || Platform.isLinux);
 
   static Future<String?> read(String key) async {
     if (_useFallback) return _fallback.read(key);

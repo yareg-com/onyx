@@ -5,11 +5,11 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
-import 'dart:ui' as ui;
 import 'package:ONYX/background/background_worker.dart';
 import 'package:ONYX/background/notification_service.dart';
 import 'package:ONYX/background/register_sync.dart';
 import 'package:ONYX/models/favorite_chat.dart';
+import 'package:ONYX/models/fav_folder.dart';
 import 'package:ONYX/screens/favorites_tab.dart';
 import 'package:flutter/foundation.dart' show kIsWeb, kDebugMode, compute;
 import 'package:flutter/material.dart';
@@ -25,17 +25,13 @@ import 'package:path_provider/path_provider.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:record/record.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:convert/convert.dart';
 import 'package:window_manager/window_manager.dart';
 import '../managers/external_server_manager.dart';
 import '../models/external_server.dart';
-import 'package:http_parser/http_parser.dart';
 import 'package:path/path.dart' as p;
-
-import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
@@ -44,14 +40,13 @@ import '../background/foreground_task_handler.dart';
 
 import '../globals.dart';
 import '../utils/upload_task.dart';
-import '../widgets/adaptive_blur.dart';
+import '../widgets/chat_background_layer.dart';
 import '../voice/voice_channel_manager.dart';
 import '../managers/settings_manager.dart';
 import '../managers/unread_manager.dart';
 import '../models/group.dart';
 import '../models/app_themes.dart';
 import '../widgets/custom_title_bar.dart';
-import '../widgets/auth_dialog.dart';
 import '../widgets/voice_confirm_dialog.dart';
 import '../widgets/search_dialog_content.dart';
 import '../screens/chats_tab.dart';
@@ -66,9 +61,9 @@ import '../managers/account_manager.dart';
 import '../models/chat_message.dart';
 import '../enums/delivery_mode.dart';
 import '../managers/lan_message_manager.dart';
-import '../widgets/message_bubble.dart';
 import '../widgets/avatar_widget.dart';
-import '../widgets/cute_bottom_nav.dart';
+import '../widgets/adaptive_nav_bar.dart';
+import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 import '../widgets/connection_title.dart';
 import '../widgets/proxy_shield_badge.dart';
 import '../utils/proxy_manager.dart';
@@ -81,6 +76,7 @@ import '../screens/external_group_chat_screen.dart';
 import '../managers/user_cache.dart';
 import '../utils/optimized_message_sender.dart';
 import '../utils/media_cache.dart';
+import '../utils/image_file_cache.dart';
 import '../managers/windows_notification_popup.dart';
 import '../l10n/app_localizations.dart';
 import '../utils/update_checker.dart';
@@ -163,6 +159,8 @@ class RootScreenState extends State<RootScreen>
   final _externalGroupChatScreenCache = _LruCache<String, Widget>(20);
 
   List<FavoriteChat> _favorites = [];
+  List<FavFolder> _favFolders = [];
+  List<String> _favTopOrder = [];
   String? _selectedFavoriteId;
 
   final Set<String> _favoritesMediaPrefetched = {};
@@ -174,6 +172,8 @@ class RootScreenState extends State<RootScreen>
   Stream<dynamic>? wsStream;
 
   List<FavoriteChat> get favorites => List.unmodifiable(_favorites);
+  List<FavFolder> get favFolders => List.unmodifiable(_favFolders);
+  List<String> get favTopOrder => List.unmodifiable(_favTopOrder);
 
   bool _isSwitchingAccount = false;
   String? _pendingAccountSwitch;
@@ -199,6 +199,7 @@ class RootScreenState extends State<RootScreen>
   int get _graphTabOffset => 0;
   bool _graphOverlayVisible = false;
   bool _graphOverlayMounted = false;
+  bool _isSearchOpen = false;
   Timer? _graphUnmountTimer;
   static double _savedHandleY = 100.0;
   double _handleY = 100.0;
@@ -239,6 +240,8 @@ class RootScreenState extends State<RootScreen>
 
   final Map<String, String> _pendingNotifications = {};
   Timer? _notifFlushTimer;
+
+
   String? selectedChatOther;
   Group? selectedGroup;
   Group? selectedExternalGroup;
@@ -407,7 +410,7 @@ class RootScreenState extends State<RootScreen>
 
       _lastRecordedPathForUpload = null;
 
-      rootScreenKey.currentState?.showSnack('Record canceled');
+
       _appendLog('[record] canceled');
     } catch (e, st) {
       debugPrint('<<cancelRecording>> unexpected: $e\n$st');
@@ -489,6 +492,8 @@ class RootScreenState extends State<RootScreen>
     _saveFavorites();
   }
 
+  void deleteFavoriteById(String id) => _deleteFavorite(id);
+
   void updateFavorite(FavoriteChat updated) {
     final index = _favorites.indexWhere((f) => f.id == updated.id);
     if (index != -1) {
@@ -496,6 +501,52 @@ class RootScreenState extends State<RootScreen>
         _favorites[index] = updated;
       });
       _saveFavorites();
+    }
+  }
+
+  /// Merge favourites received via LAN sync into the app state.
+  /// New favourites are inserted at the top of the order list.
+  /// Existing favourites with the same id get their messages merged.
+  void importFavorites(
+    List<FavoriteChat> incoming,
+    Map<String, List<ChatMessage>> incomingChats,
+  ) {
+    bool changed = false;
+    setState(() {
+      for (final fav in incoming) {
+        final exists = _favorites.any((f) => f.id == fav.id);
+        if (!exists) {
+          _favorites.add(fav);
+          if (!_favTopOrder.contains(fav.id)) _favTopOrder.insert(0, fav.id);
+          changed = true;
+        }
+      }
+    });
+
+    for (final entry in incomingChats.entries) {
+      if (!chats.containsKey(entry.key)) {
+        chats[entry.key] = entry.value;
+        changed = true;
+      } else {
+        // Merge incoming messages that are not yet present locally.
+        final existing = chats[entry.key]!;
+        final existingIds = existing.map((m) => m.id).toSet();
+        final newMessages =
+            entry.value.where((m) => !existingIds.contains(m.id)).toList();
+        if (newMessages.isNotEmpty) {
+          existing.addAll(newMessages);
+          existing.sort((a, b) => a.time.compareTo(b.time));
+          changed = true;
+        }
+      }
+    }
+
+    if (changed) {
+      _saveFavorites();
+      _saveFavStructure();
+      schedulePersistChats();
+      favoritesVersion.value++;
+      chatsVersion.value++;
     }
   }
 
@@ -511,6 +562,7 @@ class RootScreenState extends State<RootScreen>
     } else {
       setState(() => _favorites = []);
     }
+    await _loadFavStructure();
   }
 
   Future<void> _requestStatusSnapshotForKnownUsers() async {
@@ -555,6 +607,216 @@ class RootScreenState extends State<RootScreen>
     final prefs = await SharedPreferences.getInstance();
     final list = _favorites.map((f) => f.toJson()).toList();
     await prefs.setString('favorites_${currentUsername}', jsonEncode(list));
+  }
+
+  // ── Folder structure load / save ─────────────────────────────────────────
+
+  Future<void> _loadFavStructure() async {
+    if (currentUsername == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    final str = prefs.getString('fav_structure_$currentUsername');
+    List<FavFolder> folders = [];
+    List<String> topOrder = [];
+    if (str != null) {
+      try {
+        final j = jsonDecode(str) as Map<String, dynamic>;
+        folders = (j['folders'] as List? ?? [])
+            .cast<Map<String, dynamic>>()
+            .map(FavFolder.fromJson)
+            .toList();
+        topOrder = (j['topOrder'] as List? ?? []).cast<String>();
+      } catch (_) {}
+    }
+    setState(() {
+      _favFolders = folders;
+      _favTopOrder = topOrder;
+      _ensureFavTopOrder();
+    });
+  }
+
+  // Ensures _favTopOrder is consistent with _favorites and _favFolders.
+  // Call inside setState.
+  void _ensureFavTopOrder() {
+    final inFolders = _favFolders.expand((f) => f.chatIds).toSet();
+    final inTop = _favTopOrder.toSet();
+    // Collect missing favorites (not yet in top order and not in a folder)
+    final missing = _favorites
+        .where((f) => !inFolders.contains(f.id) && !inTop.contains(f.id))
+        .toList();
+    // On first migration (topOrder was empty), sort newest-added first
+    // (id is millisecondsSinceEpoch) to approximate the previous display order.
+    if (inTop.isEmpty && missing.isNotEmpty) {
+      missing.sort((a, b) => b.id.compareTo(a.id));
+    }
+    for (final fav in missing) {
+      _favTopOrder.add(fav.id);
+    }
+    // Remove stale IDs
+    final allFavIds = _favorites.map((f) => f.id).toSet();
+    final allFolderIds = _favFolders.map((f) => f.id).toSet();
+    _favTopOrder.removeWhere(
+        (id) => !allFavIds.contains(id) && !allFolderIds.contains(id));
+    for (final folder in _favFolders) {
+      folder.chatIds.removeWhere((id) => !allFavIds.contains(id));
+    }
+  }
+
+  Future<void> _saveFavStructure() async {
+    if (currentUsername == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+        'fav_structure_$currentUsername',
+        jsonEncode({
+          'folders': _favFolders.map((f) => f.toJson()).toList(),
+          'topOrder': _favTopOrder,
+        }));
+  }
+
+  // ── Public folder API ────────────────────────────────────────────────────
+
+  void createFavFolder(String name, {String? avatarPath}) {
+    final folder = FavFolder.create(name)..avatarPath = avatarPath;
+    setState(() {
+      _favFolders.add(folder);
+      _favTopOrder.insert(0, folder.id);
+    });
+    _saveFavStructure();
+    favoritesVersion.value++;
+  }
+
+  void renameFavFolder(String id, String newName) {
+    final idx = _favFolders.indexWhere((f) => f.id == id);
+    if (idx == -1) return;
+    setState(() => _favFolders[idx].name = newName);
+    _saveFavStructure();
+    favoritesVersion.value++;
+  }
+
+  void setFavFolderAvatar(String id, String? path) {
+    final idx = _favFolders.indexWhere((f) => f.id == id);
+    if (idx == -1) return;
+    setState(() => _favFolders[idx].avatarPath = path);
+    _saveFavStructure();
+    favoritesVersion.value++;
+  }
+
+  void deleteFavFolder(String id) {
+    final idx = _favFolders.indexWhere((f) => f.id == id);
+    if (idx == -1) return;
+    final folder = _favFolders[idx];
+    final folderPos = _favTopOrder.indexOf(id);
+    setState(() {
+      _favFolders.removeAt(idx);
+      _favTopOrder.remove(id);
+      // Move folder's chats back to top level at the old folder position
+      if (folderPos >= 0) {
+        _favTopOrder.insertAll(folderPos, folder.chatIds);
+      } else {
+        _favTopOrder.addAll(folder.chatIds);
+      }
+    });
+    _saveFavStructure();
+    favoritesVersion.value++;
+  }
+
+  void moveChatToFolder(String chatId, String folderId) {
+    final fIdx = _favFolders.indexWhere((f) => f.id == folderId);
+    if (fIdx == -1) return;
+    setState(() {
+      for (final f in _favFolders) f.chatIds.remove(chatId);
+      _favTopOrder.remove(chatId);
+      _favFolders[fIdx].chatIds.add(chatId);
+    });
+    _saveFavStructure();
+    favoritesVersion.value++;
+  }
+
+  void moveChatOutOfFolder(String chatId) {
+    setState(() {
+      for (final f in _favFolders) {
+        if (f.chatIds.contains(chatId)) {
+          f.chatIds.remove(chatId);
+          if (!_favTopOrder.contains(chatId)) _favTopOrder.add(chatId);
+          break;
+        }
+      }
+    });
+    _saveFavStructure();
+    favoritesVersion.value++;
+  }
+
+  void reorderFavTop(int oldIndex, int newIndex) {
+    if (newIndex > oldIndex) newIndex--;
+    setState(() {
+      final item = _favTopOrder.removeAt(oldIndex);
+      _favTopOrder.insert(newIndex, item);
+    });
+    _saveFavStructure();
+  }
+
+  void reorderFavInFolder(String folderId, int oldIndex, int newIndex) {
+    final idx = _favFolders.indexWhere((f) => f.id == folderId);
+    if (idx == -1) return;
+    if (newIndex > oldIndex) newIndex--;
+    setState(() {
+      final item = _favFolders[idx].chatIds.removeAt(oldIndex);
+      _favFolders[idx].chatIds.insert(newIndex, item);
+    });
+    _saveFavStructure();
+  }
+
+  void setFavTopOrder(List<String> orderedIds) {
+    setState(() {
+      _favTopOrder
+        ..clear()
+        ..addAll(orderedIds);
+    });
+    favoritesVersion.value++;
+    _saveFavStructure();
+  }
+
+  void bumpFavToTop(String favId) {
+    bool changed = false;
+
+    // Check top-level order
+    final topIdx = _favTopOrder.indexOf(favId);
+    if (topIdx > 0) {
+      setState(() {
+        _favTopOrder.removeAt(topIdx);
+        _favTopOrder.insert(0, favId);
+      });
+      changed = true;
+    }
+
+    // Check inside folders
+    for (int i = 0; i < _favFolders.length; i++) {
+      final folderIdx = _favFolders[i].chatIds.indexOf(favId);
+      if (folderIdx > 0) {
+        setState(() {
+          _favFolders[i].chatIds.removeAt(folderIdx);
+          _favFolders[i].chatIds.insert(0, favId);
+        });
+        changed = true;
+        break;
+      }
+    }
+
+    if (changed) {
+      favoritesVersion.value++;
+      _saveFavStructure();
+    }
+  }
+
+  void setFolderChatOrder(String folderId, List<String> orderedIds) {
+    final idx = _favFolders.indexWhere((f) => f.id == folderId);
+    if (idx == -1) return;
+    setState(() {
+      _favFolders[idx].chatIds
+        ..clear()
+        ..addAll(orderedIds);
+    });
+    favoritesVersion.value++;
+    _saveFavStructure();
   }
 
   Future<void> startRecording() async {
@@ -637,7 +899,6 @@ class RootScreenState extends State<RootScreen>
         debugPrint('<<_startRecording>> file check error: $e');
       }
 
-      rootScreenKey.currentState?.showSnack('Record started');
     } catch (e, st) {
       _appendLog('[record] start failed: $e');
       debugPrint('<<_startRecording>> start failed: $e\n$st');
@@ -785,8 +1046,7 @@ class RootScreenState extends State<RootScreen>
                   },
                   onCancel: () {
                     if (mounted) {
-                      rootScreenKey.currentState
-                          ?.showSnack('Voice message cancelled');
+
                     }
 
                     try {
@@ -2135,23 +2395,205 @@ class RootScreenState extends State<RootScreen>
   void _addFavorite(FavoriteChat fav) {
     setState(() {
       _favorites.add(fav);
+      _favTopOrder.insert(0, fav.id);
     });
     _saveFavorites();
-
+    _saveFavStructure();
+    favoritesVersion.value++;
     Future.microtask(() => ensureMediaCachedForFavorite(fav.id));
   }
 
   void _deleteFavorite(String id) {
+    final chatId = 'fav:$id';
+
+    // Capture before deletion so cleanup can run asynchronously
+    String? avatarPath;
+    try {
+      avatarPath = _favorites.firstWhere((f) => f.id == id).avatarPath;
+    } catch (_) {}
+    final deletedMessages = List<ChatMessage>.from(chats[chatId] ?? []);
+
     setState(() {
       _favorites.removeWhere((f) => f.id == id);
       if (_selectedFavoriteId == id) _selectedFavoriteId = null;
+      _favTopOrder.remove(id);
+      for (final folder in _favFolders) {
+        folder.chatIds.remove(id);
+      }
     });
     _saveFavorites();
+    _saveFavStructure();
 
-    final chatId = 'fav:$id';
     chats.remove(chatId);
     persistChats();
     chatsVersion.value++;
+
+    _cleanupFavoriteCache(deletedMessages, avatarPath);
+  }
+
+  // Deletes cached media files that are no longer referenced by any chat.
+  Future<void> _cleanupFavoriteCache(
+      List<ChatMessage> deletedMessages, String? avatarPath) async {
+    try {
+      if (deletedMessages.isEmpty && avatarPath == null) return;
+      final appDir = (await getApplicationSupportDirectory()).path;
+
+      // Files referenced by the deleted chat
+      final candidates = <({String basename, List<String> cacheDirs})>[];
+      for (final msg in deletedMessages) {
+        candidates.addAll(_parseMsgFiles(msg.content));
+      }
+
+      // Basenames still in use by any remaining chat
+      final stillUsed = <String>{};
+      for (final msgs in chats.values) {
+        for (final msg in msgs) {
+          for (final f in _parseMsgFiles(msg.content)) {
+            stillUsed.add(f.basename);
+          }
+        }
+      }
+
+      // Delete orphaned files from disk and runtime caches
+      for (final f in candidates) {
+        if (stillUsed.contains(f.basename)) continue;
+        imageFileCache.remove(f.basename);
+        mediaFilePathRegistry.remove(f.basename);
+        for (final dir in f.cacheDirs) {
+          for (final name in [f.basename, '${f.basename}.enc']) {
+            try {
+              final file = File('$appDir/$dir/$name');
+              if (await file.exists()) await file.delete();
+            } catch (_) {}
+          }
+        }
+      }
+
+      // Avatar
+      if (avatarPath != null) {
+        try {
+          final f = File(avatarPath);
+          if (await f.exists()) await f.delete();
+        } catch (_) {}
+      }
+    } catch (e) {
+      if (kDebugMode) print('[FavCleanup] error: $e');
+    }
+  }
+
+  static Iterable<({String basename, List<String> cacheDirs})> _parseMsgFiles(
+      String content) sync* {
+    String fn(Map<String, dynamic> d) =>
+        p.basename((d['filename'] ?? d['orig'])?.toString() ?? '');
+
+    if (content.startsWith('IMAGEv1:')) {
+      try {
+        final n = fn(jsonDecode(content.substring(8)) as Map<String, dynamic>);
+        if (n.isNotEmpty) yield (basename: n, cacheDirs: ['image_cache']);
+      } catch (_) {}
+      return;
+    }
+    if (content.startsWith('ALBUMv1:')) {
+      try {
+        for (final item
+            in (jsonDecode(content.substring(8)) as List).cast<Map<String, dynamic>>()) {
+          final n = fn(item);
+          if (n.isNotEmpty) yield (basename: n, cacheDirs: ['image_cache']);
+        }
+      } catch (_) {}
+      return;
+    }
+    if (content.toUpperCase().startsWith('VIDEOV1:')) {
+      try {
+        final n = fn(jsonDecode(content.substring(8)) as Map<String, dynamic>);
+        if (n.isNotEmpty) yield (basename: n, cacheDirs: ['video_cache']);
+      } catch (_) {}
+      return;
+    }
+    if (content.startsWith('VOICEv1:')) {
+      try {
+        final n = fn(jsonDecode(content.substring(8)) as Map<String, dynamic>);
+        if (n.isNotEmpty) yield (basename: n, cacheDirs: ['voice_cache', 'audio_cache']);
+      } catch (_) {}
+      return;
+    }
+    if (content.startsWith('AUDIOv1:')) {
+      try {
+        final n = fn(jsonDecode(content.substring(8)) as Map<String, dynamic>);
+        if (n.isNotEmpty) yield (basename: n, cacheDirs: ['audio_cache']);
+      } catch (_) {}
+      return;
+    }
+    if (content.startsWith('FILEv1:') || content.startsWith('DATAv1:')) {
+      try {
+        final n = fn(jsonDecode(content.substring(7)) as Map<String, dynamic>);
+        if (n.isNotEmpty) yield (basename: n, cacheDirs: ['data_cache']);
+      } catch (_) {}
+      return;
+    }
+    if (content.startsWith('DOCUMENTv1:')) {
+      try {
+        final n = fn(jsonDecode(content.substring(11)) as Map<String, dynamic>);
+        if (n.isNotEmpty) yield (basename: n, cacheDirs: ['document_cache']);
+      } catch (_) {}
+      return;
+    }
+    if (content.startsWith('ARCHIVEv1:')) {
+      try {
+        final n = fn(jsonDecode(content.substring(10)) as Map<String, dynamic>);
+        if (n.isNotEmpty) yield (basename: n, cacheDirs: ['archive_cache']);
+      } catch (_) {}
+      return;
+    }
+  }
+
+  /// Scans all cache directories and deletes files not referenced by any chat.
+  /// Returns the number of deleted files and total freed bytes.
+  Future<({int files, int bytes})> purgeOrphanedCache() async {
+    final appDir = (await getApplicationSupportDirectory()).path;
+
+    // Collect every basename referenced by any chat message
+    final kept = <String>{};
+    for (final msgs in chats.values) {
+      for (final msg in msgs) {
+        for (final f in _parseMsgFiles(msg.content)) {
+          kept.add(f.basename);
+        }
+      }
+    }
+    // Keep avatar files of current favorites
+    for (final fav in _favorites) {
+      if (fav.avatarPath != null) kept.add(p.basename(fav.avatarPath!));
+    }
+
+    const dirs = [
+      'image_cache', 'video_cache', 'audio_cache', 'voice_cache',
+      'document_cache', 'archive_cache', 'data_cache', 'fav_avatars',
+    ];
+
+    int deletedFiles = 0;
+    int deletedBytes = 0;
+
+    for (final dirName in dirs) {
+      final dir = Directory('$appDir/$dirName');
+      if (!await dir.exists()) continue;
+      await for (final entity in dir.list()) {
+        if (entity is! File) continue;
+        var base = p.basename(entity.path);
+        if (base.endsWith('.enc')) base = base.substring(0, base.length - 4);
+        if (kept.contains(base)) continue;
+        try {
+          final size = await entity.length();
+          await entity.delete();
+          deletedFiles++;
+          deletedBytes += size;
+          imageFileCache.remove(base);
+          mediaFilePathRegistry.remove(base);
+        } catch (_) {}
+      }
+    }
+
+    return (files: deletedFiles, bytes: deletedBytes);
   }
 
   Future<void> _configureAudioSession() async {
@@ -2641,12 +3083,6 @@ class RootScreenState extends State<RootScreen>
 
       unawaited(_loadFavorites());
 
-      if (currentUsername != null) {
-        final uname = currentUsername!;
-        unawaited(LANMessageManager().initialize(uname).catchError((e) {
-          _appendLog('[LAN] Failed to initialize: $e');
-        }));
-      }
 
       unawaited(ExternalServerManager.loadServers().then((_) {
         return ExternalServerManager.refreshAllExternalGroups();
@@ -3004,6 +3440,10 @@ class RootScreenState extends State<RootScreen>
     addChatListHint(chatId);
     chatsVersion.value++;
     bumpChatMessageVersion(chatId);
+    if (chatId.startsWith('fav:')) {
+      final favId = chatId.substring(4);
+      bumpFavToTop(favId);
+    }
   }
 
   /// Rebuilds the serverMessageId → chatId index from scratch.
@@ -3379,6 +3819,79 @@ class RootScreenState extends State<RootScreen>
 
   Future<bool> loginAccount(String u, String p) => _login(u, p);
   Future<String?> registerAccount(String u, String p) => _register(u, p);
+
+  /// Log in using a token received via QR auth (no password needed).
+  Future<bool> loginWithQrToken({
+    required String username,
+    required String token,
+    required String uin,
+    required bool isPrimary,
+  }) async {
+    try {
+      await AccountManager.saveToken(username, token);
+      await AccountManager.saveUsername(username);
+      await AccountManager.addAccount(username);
+      await AccountManager.setCurrentAccount(username);
+      currentUsername = username;
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('uin_$username', uin);
+
+      await SecureStore.write(
+        'is_primary_device_$username',
+        isPrimary ? 'true' : 'false',
+      );
+
+      ExternalServerManager.disconnectAll();
+      setState(() {
+        _favorites.clear();
+        _selectedFavoriteId = null;
+        selectedChatOther = null;
+        selectedGroup = null;
+        selectedExternalGroup = null;
+        selectedExternalServer = null;
+        _chatScreenCache.clear();
+        _groupChatScreenCache.clear();
+        _externalGroupChatScreenCache.clear();
+      });
+
+      await _loadAccountData(username);
+      await _loadFavorites();
+      _appendLog('[qr-login] ok for $username');
+
+      await _disconnectWs();
+      _pubkeyCache.clear();
+      _pubkeyUploadedToServer = false;
+      _lastPubkeyUploadAttempt = null;
+
+      bool ready = false;
+      for (int i = 0; i < 5; i++) {
+        ready = await _ensurePubkeyAndWsReady(
+          maxRetries: 3,
+          retryDelay: const Duration(milliseconds: 300),
+        );
+        if (ready && _ws != null) break;
+        await Future.delayed(const Duration(milliseconds: 400));
+      }
+
+      if (!ready || _ws == null) {
+        showSnack('QR login ok but connection unstable');
+        _appendLog('[qr-login] warning: WS not ready after retries');
+      }
+
+      try {
+        await ExternalServerManager.loadServers();
+        await ExternalServerManager.refreshAllExternalGroups();
+      } catch (e) {
+        _appendLog('[ext-servers] Failed to load for qr account: $e');
+      }
+
+      return true;
+    } catch (e) {
+      _appendLog('[qr-login] error: $e');
+    }
+    return false;
+  }
 
   Future<bool> _login(String username, String password) async {
     try {
@@ -4164,6 +4677,7 @@ class RootScreenState extends State<RootScreen>
                       duration: const Duration(seconds: 8),
                       action: SnackBarAction(
                         label: 'Review',
+                        textColor: colorScheme.primary,
                         onPressed: _openSessions,
                       ),
                     ),
@@ -4818,6 +5332,12 @@ class RootScreenState extends State<RootScreen>
 
   void connectWs() {
     _connectWs();
+  }
+
+  /// Called after PIN unlock so the account and chats are reloaded
+  /// without requiring a full app restart.
+  Future<void> reloadAfterUnlock() async {
+    await _loadCurrentAccount();
   }
 
   Future<void> disconnectWs() async {
@@ -6210,13 +6730,16 @@ class RootScreenState extends State<RootScreen>
 
     final double titleBarHeight = 42.0;
     final TextEditingController _dialogSearchCtrl = TextEditingController();
+    final bool useGlass = SettingsManager.liquidGlassOnSearch.value;
+
+    setState(() => _isSearchOpen = true);
 
     showGeneralDialog(
       context: context,
       barrierDismissible: true,
       barrierLabel: 'Search',
-      barrierColor: Colors.black54,
-      transitionDuration: const Duration(milliseconds: 200),
+      barrierColor: useGlass ? Colors.black26 : Colors.black54,
+      transitionDuration: const Duration(milliseconds: 320),
       pageBuilder: (context, animation, secondaryAnimation) {
         final bool isDesktop = MediaQuery.of(context).size.width > 700;
         return SafeArea(
@@ -6230,39 +6753,9 @@ class RootScreenState extends State<RootScreen>
               alignment: Alignment.topCenter,
               child: Material(
                 color: Colors.transparent,
-                child: Container(
+                child: SizedBox(
                   width: isDesktop ? 640 : double.infinity,
-                  constraints: const BoxConstraints(maxHeight: 520),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(20),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.28),
-                        blurRadius: 36,
-                        offset: const Offset(0, 10),
-                      ),
-                    ],
-                  ),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(20),
-                    child: Builder(builder: (context) {
-                      final Widget inner = Container(
-                        padding: const EdgeInsets.all(8.0),
-                        decoration: BoxDecoration(
-                          color: Theme.of(context)
-                              .colorScheme
-                              .surface
-                              .withValues(alpha: isDesktop ? 0.90 : 1.0),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(
-                            color: Theme.of(context)
-                                .colorScheme
-                                .outline
-                                .withValues(alpha: 0.10),
-                            width: 1,
-                          ),
-                        ),
-                        child: SearchDialogContent(
+                  child: SearchDialogContent(
                           controller: _dialogSearchCtrl,
                           onSelect: (username) {
                             Navigator.of(context).pop();
@@ -6307,16 +6800,6 @@ class RootScreenState extends State<RootScreen>
                             }
                           },
                         ),
-                      );
-                      if (isDesktop) {
-                        return BackdropFilter(
-                          filter: ui.ImageFilter.blur(sigmaX: 22, sigmaY: 22),
-                          child: inner,
-                        );
-                      }
-                      return inner;
-                    }),
-                  ),
                 ),
               ),
             ),
@@ -6329,7 +6812,9 @@ class RootScreenState extends State<RootScreen>
           child: child,
         );
       },
-    );
+    ).whenComplete(() {
+      if (mounted) setState(() => _isSearchOpen = false);
+    });
   }
 
   Widget _buildMobileAppBar(BuildContext context) {
@@ -6337,10 +6822,14 @@ class RootScreenState extends State<RootScreen>
       valueListenable: SettingsManager.applyGlobally,
       builder: (_, apply, __) {
         return ValueListenableBuilder<String?>(
+          valueListenable: SettingsManager.chatVideoBackground,
+          builder: (_, videoPath, __) {
+        return ValueListenableBuilder<String?>(
           valueListenable: SettingsManager.chatBackground,
           builder: (_, path, __) {
-            final makeTransparent =
-                apply && path != null && File(path).existsSync();
+            final makeTransparent = apply &&
+                ((path != null && File(path).existsSync()) ||
+                    (videoPath != null && File(videoPath).existsSync()));
             return ValueListenableBuilder<bool>(
               valueListenable: SettingsManager.showAccountIndicator,
               builder: (_, showInd, __) => AppBar(
@@ -6425,6 +6914,8 @@ class RootScreenState extends State<RootScreen>
                 ],
               ),
             );
+          },
+        );
           },
         );
       },
@@ -6848,6 +7339,7 @@ class RootScreenState extends State<RootScreen>
                                                 : null,
                                         onLogin: _login,
                                         onRegister: _register,
+                                        onQrLogin: loginWithQrToken,
                                         onSwitchAccount:
                                             _switchToAccountWithAuth,
                                         onDeleteAccount: _deleteAccount,
@@ -7124,46 +7616,7 @@ class RootScreenState extends State<RootScreen>
                               if (isDesktop && apply) {
                                 return Stack(
                                   children: [
-                                    ValueListenableBuilder<String?>(
-                                      valueListenable:
-                                          SettingsManager.chatBackground,
-                                      builder: (_, path, __) {
-                                        if (path == null)
-                                          return const SizedBox.shrink();
-                                        final f = File(path);
-                                        if (!f.existsSync())
-                                          return const SizedBox.shrink();
-                                        return ValueListenableBuilder<bool>(
-                                          valueListenable:
-                                              SettingsManager.blurBackground,
-                                          builder: (_, blur, __) {
-                                            return ValueListenableBuilder<
-                                                double>(
-                                              valueListenable:
-                                                  SettingsManager.blurSigma,
-                                              builder: (_, sigma, __) {
-                                                final provider = FileImage(f);
-                                                final child = blur
-                                                    ? AdaptiveBlur(
-                                                        imageProvider: provider,
-                                                        sigma: sigma,
-                                                        fit: BoxFit.cover)
-                                                    : Image(
-                                                        image: provider,
-                                                        fit: BoxFit.cover);
-                                                return Positioned.fill(
-                                                  child: IgnorePointer(
-                                                    child: Opacity(
-                                                        opacity: 0.95,
-                                                        child: child),
-                                                  ),
-                                                );
-                                              },
-                                            );
-                                          },
-                                        );
-                                      },
-                                    ),
+                                    const ChatBackgroundLayer(),
                                     content,
                                   ],
                                 );
@@ -7295,6 +7748,7 @@ class RootScreenState extends State<RootScreen>
                   identityPubFp: null,
                   onLogin: _login,
                   onRegister: _register,
+                  onQrLogin: loginWithQrToken,
                   onSwitchAccount: _switchToAccountWithAuth,
                   onDeleteAccount: _deleteAccount,
                   logs: _log,
@@ -7416,6 +7870,7 @@ class RootScreenState extends State<RootScreen>
             : null,
         onLogin: _login,
         onRegister: _register,
+        onQrLogin: loginWithQrToken,
         onSwitchAccount: _switchToAccountWithAuth,
         onDeleteAccount: _deleteAccount,
         logs: _log,
@@ -7505,43 +7960,15 @@ class RootScreenState extends State<RootScreen>
             ),
           );
 
-    return Scaffold(
-      body: Stack(
+    return GlassBackdropScope(
+      child: Scaffold(
+        body: Stack(
         children: [
           ValueListenableBuilder<bool>(
             valueListenable: SettingsManager.applyGlobally,
             builder: (ctx, apply, _) {
               if (!apply || isDesktop) return const SizedBox.shrink();
-              return ValueListenableBuilder<String?>(
-                valueListenable: SettingsManager.chatBackground,
-                builder: (_, path, __) {
-                  if (path == null) return const SizedBox.shrink();
-                  final f = File(path);
-                  if (!f.existsSync()) return const SizedBox.shrink();
-                  return ValueListenableBuilder<bool>(
-                    valueListenable: SettingsManager.blurBackground,
-                    builder: (_, blur, __) {
-                      return ValueListenableBuilder<double>(
-                        valueListenable: SettingsManager.blurSigma,
-                        builder: (_, sigma, __) {
-                          final provider = FileImage(f);
-                          final child = blur
-                              ? AdaptiveBlur(
-                                  imageProvider: provider,
-                                  sigma: sigma,
-                                  fit: BoxFit.cover)
-                              : Image(image: provider, fit: BoxFit.cover);
-                          return Positioned.fill(
-                            child: IgnorePointer(
-                              child: Opacity(opacity: 0.95, child: child),
-                            ),
-                          );
-                        },
-                      );
-                    },
-                  );
-                },
-              );
+              return const ChatBackgroundLayer();
             },
           ),
           SafeArea(
@@ -7573,6 +8000,9 @@ class RootScreenState extends State<RootScreen>
                               scheme.surfaceContainerHighest, brightness)
                           .withValues(alpha: opacity);
                       final hideBottomNav = !isDesktop && _graphOverlayVisible;
+                      final isLiquidGlass = !isDesktop &&
+                          SettingsManager.liquidGlassOnNavBar.value;
+                      final hideForSearch = !isDesktop && _isSearchOpen;
 
                       return Positioned.fill(
                         child: Align(
@@ -7592,226 +8022,43 @@ class RootScreenState extends State<RootScreen>
                                   child: AnimatedSlide(
                                     offset: hideBottomNav
                                         ? const Offset(0.0, 1.75)
-                                        : Offset.zero,
-                                    duration: const Duration(milliseconds: 280),
-                                    curve: hideBottomNav
+                                        : (hideForSearch && !isLiquidGlass)
+                                            ? const Offset(0.0, 1.75)
+                                            : Offset.zero,
+                                    duration: const Duration(milliseconds: 320),
+                                    curve: (hideBottomNav || hideForSearch)
                                         ? Curves.easeInCubic
                                         : Curves.easeOutCubic,
                                     child: AnimatedOpacity(
-                                      opacity: hideBottomNav ? 0.0 : 1.0,
+                                      opacity: (hideBottomNav ||
+                                              (hideForSearch && isLiquidGlass))
+                                          ? 0.0
+                                          : 1.0,
                                       duration:
-                                          const Duration(milliseconds: 220),
-                                      curve: hideBottomNav
+                                          const Duration(milliseconds: 260),
+                                      curve: (hideBottomNav || hideForSearch)
                                           ? Curves.easeInCubic
                                           : Curves.easeOutCubic,
-                                      child: child,
+                                      child: AnimatedScale(
+                                        scale: (hideForSearch && isLiquidGlass)
+                                            ? 0.88
+                                            : 1.0,
+                                        duration: const Duration(milliseconds: 280),
+                                        curve: Curves.easeInCubic,
+                                        child: child,
+                                      ),
                                     ),
                                   ),
                                 ),
                               );
                             },
-                            child: SafeArea(
-                              bottom: true,
-                              child: Padding(
-                                padding: EdgeInsets.only(
-                                  bottom: 18.0,
-                                  left: leftPad,
-                                  right: isDesktop ? 0 : 70,
-                                ),
-                                child: ClipRRect(
-                                  borderRadius: BorderRadius.circular(20),
-                                  child: Container(
-                                    height: 58,
-                                    width: isDesktop ? navWidth : navWidth + 20,
-                                    decoration: BoxDecoration(
-                                      color: navBackground,
-                                      borderRadius: BorderRadius.circular(28),
-                                      border: Border.all(
-                                        color: Theme.of(context)
-                                            .dividerColor
-                                            .withOpacity(0.15),
-                                        width: 1,
-                                      ),
-                                    ),
-                                    child: Center(
-                                      child: Padding(
-                                        padding: EdgeInsets.symmetric(
-                                          horizontal: isDesktop ? 0 : 10,
-                                        ),
-                                        child: GestureDetector(
-                                          behavior: HitTestBehavior.translucent,
-                                          onHorizontalDragUpdate: isDesktop
-                                              ? null
-                                              : (details) {
-                                                  final tabWidth = navWidth / 5;
-                                                  final newIndex = (details
-                                                              .localPosition
-                                                              .dx /
-                                                          tabWidth)
-                                                      .floor()
-                                                      .clamp(0, 4);
-                                                  if (newIndex != _index) {
-                                                    HapticFeedback
-                                                        .selectionClick();
-                                                    setState(() =>
-                                                        _index = newIndex);
-                                                    if (_pageController
-                                                        .hasClients) {
-                                                      _pageController
-                                                          .jumpToPage(newIndex +
-                                                              _graphTabOffset);
-                                                    }
-                                                  }
-                                                },
-                                          child: SizedBox(
-                                            width: navWidth,
-                                            height: 58,
-                                            child: NavigationBar(
-                                              selectedIndex:
-                                                  _index < 5 ? _index : 4,
-                                              onDestinationSelected:
-                                                  _onTabSelected,
-                                              height: 58,
-                                              labelBehavior:
-                                                  NavigationDestinationLabelBehavior
-                                                      .alwaysHide,
-                                              destinations: [
-                                                NavigationDestination(
-                                                  icon: AnimatedNavIcon(
-                                                    icon: Icons.chat_bubble,
-                                                    size: 22,
-                                                    isSelected: _index == 0,
-                                                    animationType:
-                                                        NavIconAnimationType
-                                                            .bounce,
-                                                    entryDelay: 300,
-                                                  ),
-                                                  selectedIcon: AnimatedNavIcon(
-                                                    icon: Icons.chat_bubble,
-                                                    size: 24,
-                                                    color: Theme.of(context)
-                                                        .colorScheme
-                                                        .primary,
-                                                    isSelected: _index == 0,
-                                                    animationType:
-                                                        NavIconAnimationType
-                                                            .bounce,
-                                                    entryDelay: 300,
-                                                  ),
-                                                  label: '',
-                                                ),
-                                                NavigationDestination(
-                                                  icon: AnimatedNavIcon(
-                                                    icon: Icons.group,
-                                                    size: 22,
-                                                    isSelected: _index == 1,
-                                                    animationType:
-                                                        NavIconAnimationType
-                                                            .bounce,
-                                                    entryDelay: 400,
-                                                  ),
-                                                  selectedIcon: AnimatedNavIcon(
-                                                    icon: Icons.group,
-                                                    size: 24,
-                                                    color: Theme.of(context)
-                                                        .colorScheme
-                                                        .primary,
-                                                    isSelected: _index == 1,
-                                                    animationType:
-                                                        NavIconAnimationType
-                                                            .bounce,
-                                                    entryDelay: 400,
-                                                  ),
-                                                  label: '',
-                                                ),
-                                                NavigationDestination(
-                                                  icon: AnimatedNavIcon(
-                                                    icon:
-                                                        Icons.bookmark_outlined,
-                                                    size: 22,
-                                                    isSelected: _index == 2,
-                                                    animationType:
-                                                        NavIconAnimationType
-                                                            .bounce,
-                                                    entryDelay: 500,
-                                                  ),
-                                                  selectedIcon: AnimatedNavIcon(
-                                                    icon: Icons.bookmark,
-                                                    size: 24,
-                                                    color: Theme.of(context)
-                                                        .colorScheme
-                                                        .primary,
-                                                    isSelected: _index == 2,
-                                                    animationType:
-                                                        NavIconAnimationType
-                                                            .bounce,
-                                                    entryDelay: 500,
-                                                  ),
-                                                  label: '',
-                                                ),
-                                                NavigationDestination(
-                                                  icon: AnimatedNavIcon(
-                                                    icon: Icons.person,
-                                                    size: 22,
-                                                    isSelected: _index == 3,
-                                                    animationType:
-                                                        NavIconAnimationType
-                                                            .bounce,
-                                                    entryDelay: 600,
-                                                  ),
-                                                  selectedIcon: AnimatedNavIcon(
-                                                    icon: Icons.person,
-                                                    size: 24,
-                                                    color: Theme.of(context)
-                                                        .colorScheme
-                                                        .primary,
-                                                    isSelected: _index == 3,
-                                                    animationType:
-                                                        NavIconAnimationType
-                                                            .bounce,
-                                                    entryDelay: 600,
-                                                  ),
-                                                  label: '',
-                                                ),
-                                                NavigationDestination(
-                                                  icon: AnimatedNavIcon(
-                                                    icon: Icons.settings,
-                                                    size: 22,
-                                                    isSelected: _index == 4,
-                                                    animationType:
-                                                        NavIconAnimationType
-                                                            .spin,
-                                                    entryDelay: 700,
-                                                  ),
-                                                  selectedIcon: AnimatedNavIcon(
-                                                    icon: Icons.settings,
-                                                    size: 24,
-                                                    color: Theme.of(context)
-                                                        .colorScheme
-                                                        .primary,
-                                                    isSelected: _index == 4,
-                                                    animationType:
-                                                        NavIconAnimationType
-                                                            .spin,
-                                                    entryDelay: 700,
-                                                  ),
-                                                  label: '',
-                                                ),
-                                              ],
-                                              backgroundColor:
-                                                  Colors.transparent,
-                                              indicatorColor: Theme.of(context)
-                                                  .colorScheme
-                                                  .primary
-                                                  .withOpacity(0.15),
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
+                            child: AdaptiveNavBar(
+                              selectedIndex: _index,
+                              onTap: _onTabSelected,
+                              isDesktop: isDesktop,
+                              navWidth: navWidth,
+                              leftPad: leftPad,
+                              navBackground: navBackground,
                             ),
                           ),
                         ),
@@ -7824,6 +8071,7 @@ class RootScreenState extends State<RootScreen>
           ),
         ],
       ),
+    ),
     );
   }
 }

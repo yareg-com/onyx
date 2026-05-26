@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import '../globals.dart';
+import '../models/fav_folder.dart';
 import '../models/group.dart';
 import '../models/favorite_chat.dart';
 import '../models/external_server.dart';
@@ -13,7 +14,7 @@ import '../managers/external_server_manager.dart';
 import '../managers/settings_manager.dart';
 import '../managers/user_cache.dart';
 import '../widgets/avatar_widget.dart';
-import '../widgets/adaptive_blur.dart';
+import '../widgets/chat_background_layer.dart';
 import '../widgets/animated_nav_icon.dart';
 
 class ForwardScreen extends StatefulWidget {
@@ -51,6 +52,9 @@ class _ForwardScreenState extends State<ForwardScreen> {
   List<Group> _internalGroups = [];
   List<Group> _externalGroups = [];
   List<FavoriteChat> _favorites = [];
+  List<FavFolder> _favFolders = [];
+  List<String> _favTopOrder = [];
+  final Set<String> _expandedFolderIds = {};
   bool _groupsLoading = true;
   bool _sending = false;
 
@@ -72,17 +76,29 @@ class _ForwardScreenState extends State<ForwardScreen> {
     if (root == null) return;
     final me = root.currentUsername ?? '';
 
-    final usernames = <String>[];
+    // Build username → chatKey map, then sort by last message time
+    final usernameToKey = <String, String>{};
     for (final key in root.chats.keys) {
       if (key.startsWith('fav:')) continue;
       final parts = key.split(':');
       if (parts.length == 2) {
         final other = parts.firstWhere((p) => p != me, orElse: () => '');
-        if (other.isNotEmpty && other != me) usernames.add(other);
+        if (other.isNotEmpty && other != me) usernameToKey[other] = key;
       }
     }
+    final usernames = usernameToKey.keys.toList();
+    usernames.sort((a, b) {
+      final msgsA = root.chats[usernameToKey[a]] ?? [];
+      final msgsB = root.chats[usernameToKey[b]] ?? [];
+      final timeA = msgsA.isNotEmpty ? msgsA.last.time : DateTime(0);
+      final timeB = msgsB.isNotEmpty ? msgsB.last.time : DateTime(0);
+      return timeB.compareTo(timeA);
+    });
     _chatUsernames = usernames;
+
     _favorites = root.favorites.toList();
+    _favFolders = List.from(root.favFolders);
+    _favTopOrder = List.from(root.favTopOrder);
     _loadGroups(me);
   }
 
@@ -247,38 +263,7 @@ class _ForwardScreenState extends State<ForwardScreen> {
 
   // ── background (mobile scaffold only) ────────────────────────────────────────
 
-  Widget _buildBackground() {
-    return ValueListenableBuilder<String?>(
-      valueListenable: SettingsManager.chatBackground,
-      builder: (_, path, __) {
-        if (path == null) return const SizedBox.shrink();
-        final f = File(path);
-        if (!f.existsSync()) return const SizedBox.shrink();
-        return ValueListenableBuilder<bool>(
-          valueListenable: SettingsManager.blurBackground,
-          builder: (_, blur, __) {
-            return ValueListenableBuilder<double>(
-              valueListenable: SettingsManager.blurSigma,
-              builder: (_, sigma, __) {
-                final provider = FileImage(f);
-                final child = blur
-                    ? AdaptiveBlur(
-                        imageProvider: provider,
-                        sigma: sigma,
-                        fit: BoxFit.cover)
-                    : Image(image: provider, fit: BoxFit.cover);
-                return Positioned.fill(
-                  child: IgnorePointer(
-                    child: Opacity(opacity: 0.95, child: child),
-                  ),
-                );
-              },
-            );
-          },
-        );
-      },
-    );
-  }
+  Widget _buildBackground() => const ChatBackgroundLayer();
 
   // ── shared NavigationBar destinations ────────────────────────────────────────
 
@@ -750,10 +735,141 @@ class _ForwardScreenState extends State<ForwardScreen> {
     );
   }
 
+  Widget _buildFavItem(FavoriteChat fav) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: () => _sendToFavorite(fav),
+      child: _glassCard(
+        context: context,
+        child: Row(
+          children: [
+            _buildFavAvatar(context, fav),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                fav.title,
+                style:
+                    const TextStyle(fontWeight: FontWeight.w500, fontSize: 15),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildFavoritesTab(double bottomInset) {
     if (_favorites.isEmpty) {
       return const Center(child: Text('No favorites'));
     }
+
+    final scheme = Theme.of(context).colorScheme;
+    final favMap = {for (final f in _favorites) f.id: f};
+    final folderMap = {for (final f in _favFolders) f.id: f};
+    final items = <Widget>[];
+    final shownFolderIds = <String>{};
+    final shownChatIds = <String>{};
+
+    void addFolderTile(FavFolder folder) {
+      final isExpanded = _expandedFolderIds.contains(folder.id);
+      final folderChats = folder.chatIds
+          .map((id) => favMap[id])
+          .whereType<FavoriteChat>()
+          .toList();
+
+      items.add(InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: () => setState(() {
+          if (isExpanded) {
+            _expandedFolderIds.remove(folder.id);
+          } else {
+            _expandedFolderIds.add(folder.id);
+          }
+        }),
+        child: _glassCard(
+          context: context,
+          child: Row(
+            children: [
+              folder.avatarPath != null &&
+                      File(folder.avatarPath!).existsSync()
+                  ? CircleAvatar(
+                      radius: 20,
+                      backgroundImage: FileImage(File(folder.avatarPath!)))
+                  : CircleAvatar(
+                      radius: 20,
+                      backgroundColor: scheme.primaryContainer,
+                      child:
+                          Icon(Icons.folder_rounded, color: scheme.primary)),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(folder.name,
+                        style: const TextStyle(
+                            fontWeight: FontWeight.w500, fontSize: 15),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis),
+                    Text(
+                      '${folderChats.length} chat${folderChats.length == 1 ? '' : 's'}',
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: scheme.onSurface.withValues(alpha: 0.5)),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(
+                isExpanded ? Icons.expand_less : Icons.expand_more,
+                color: scheme.onSurface.withValues(alpha: 0.5),
+              ),
+            ],
+          ),
+        ),
+      ));
+
+      if (isExpanded) {
+        for (final fav in folderChats) {
+          items.add(Padding(
+            padding: const EdgeInsets.only(left: 16),
+            child: _buildFavItem(fav),
+          ));
+        }
+      }
+    }
+
+    for (final itemId in _favTopOrder) {
+      final folder = folderMap[itemId];
+      if (folder != null) {
+        addFolderTile(folder);
+        shownFolderIds.add(folder.id);
+      } else {
+        final fav = favMap[itemId];
+        if (fav != null) {
+          items.add(_buildFavItem(fav));
+          shownChatIds.add(fav.id);
+        }
+      }
+    }
+
+    // Folders not in favTopOrder
+    for (final folder in _favFolders) {
+      if (shownFolderIds.contains(folder.id)) continue;
+      addFolderTile(folder);
+      shownFolderIds.add(folder.id);
+    }
+
+    // Unfoldered chats not yet shown
+    final inFolders = _favFolders.expand((f) => f.chatIds).toSet();
+    for (final fav in _favorites) {
+      if (shownChatIds.contains(fav.id)) continue;
+      if (inFolders.contains(fav.id)) continue;
+      items.add(_buildFavItem(fav));
+    }
+
     return ListView.separated(
       padding: EdgeInsets.fromLTRB(
           12,
@@ -762,33 +878,9 @@ class _ForwardScreenState extends State<ForwardScreen> {
               : kToolbarHeight + MediaQuery.of(context).padding.top + 8,
           12,
           bottomInset + 8),
-      itemCount: _favorites.length,
+      itemCount: items.length,
       separatorBuilder: (_, __) => const SizedBox(height: 6),
-      itemBuilder: (context, i) {
-        final fav = _favorites[i];
-        return InkWell(
-          borderRadius: BorderRadius.circular(16),
-          onTap: () => _sendToFavorite(fav),
-          child: _glassCard(
-            context: context,
-            child: Row(
-              children: [
-                _buildFavAvatar(context, fav),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    fav.title,
-                    style: const TextStyle(
-                        fontWeight: FontWeight.w500, fontSize: 15),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
+      itemBuilder: (_, i) => items[i],
     );
   }
 }

@@ -14,10 +14,20 @@ bool _isValidUsername(String u) =>
 
 class AuthDialog extends StatefulWidget {
   final Future<bool> Function(String, String) onLogin;
-  
   final Future<String?> Function(String, String) onRegister;
+  final Future<bool> Function({
+    required String username,
+    required String token,
+    required String uin,
+    required bool isPrimary,
+  }) onQrLogin;
 
-  const AuthDialog({super.key, required this.onLogin, required this.onRegister});
+  const AuthDialog({
+    super.key,
+    required this.onLogin,
+    required this.onRegister,
+    required this.onQrLogin,
+  });
 
   @override
   State<AuthDialog> createState() => AuthDialogState();
@@ -321,13 +331,13 @@ class AuthDialogState extends State<AuthDialog> {
                                   final passphrase = await widget.onRegister(u, p);
                                   if (!mounted) return;
                                   if (passphrase != null) {
-                                    
+
                                     await SecureStore.write('passphrase_$u', passphrase);
                                     await SecureStore.write('is_primary_device_$u', 'true');
-                                    
+
                                     await _showPassphraseDialog(u, passphrase);
                                     if (!mounted) return;
-                                    
+
                                     if (await widget.onLogin(u, p)) {
                                       if (mounted) Navigator.of(context).pop();
                                     }
@@ -338,6 +348,7 @@ class AuthDialogState extends State<AuthDialog> {
                                 icon: const Icon(Icons.app_registration, size: 18),
                                 label: Text(l.registerBtn),
                               ),
+
                             ],
                           ),
                         ],
@@ -492,3 +503,4 @@ class _PassphraseDialogState extends State<_PassphraseDialog> {
     );
   }
 }
+

@@ -1,8 +1,9 @@
 // lib/screens/settings_tab.dart
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart' show compute;
+import 'package:flutter/foundation.dart' show compute, ValueListenable;
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:path_provider/path_provider.dart';
+import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 import 'package:http/http.dart' as http;
@@ -15,6 +16,7 @@ import '../managers/secure_store.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import '../managers/account_manager.dart';
 import '../managers/settings_manager.dart';
+import '../enums/liquid_glass_quality.dart';
 import '../l10n/app_localizations.dart';
 import '../utils/proxy_manager.dart';
 import 'pin_code_screen.dart';
@@ -23,12 +25,16 @@ import 'cache_manager_screen.dart';
 import 'package:local_auth/local_auth.dart';
 import '../globals.dart';
 import '../widgets/adaptive_blur.dart';
+import '../widgets/adaptive_glass_card.dart';
 import '../models/app_themes.dart';
 import '../models/font_family.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../utils/autostart_manager.dart';
 import '../managers/blocklist_manager.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' show MediaDeviceInfo, navigator;
+import 'package:media_kit/media_kit.dart';
+import 'package:media_kit_video/media_kit_video.dart';
+import '../widgets/media_picker_sheet.dart';
 
 void _showStyledSnack(BuildContext context, String text, {Duration duration = const Duration(seconds: 2)}) {
   final colorScheme = Theme.of(context).colorScheme;
@@ -322,7 +328,8 @@ class _SettingsTabState extends State<SettingsTab>
   bool get wantKeepAlive => true;
   late final int _randomTipIndex;
   double? _cacheSizeMb;
-  bool _cacheSizeLoaded = false; 
+  bool _cacheSizeLoaded = false;
+  bool _purging = false;
 
   late final AnimationController _fadeController;
   late final Animation<double> _fadeAnimation;
@@ -478,6 +485,35 @@ class _SettingsTabState extends State<SettingsTab>
       _cacheSizeLoaded = false;
     });
     _loadTotalCacheSize();
+  }
+
+  Future<void> _purgeOrphanedCache() async {
+    final l = AppLocalizations.of(context);
+    setState(() => _purging = true);
+    try {
+      final result = await rootScreenKey.currentState?.purgeOrphanedCache();
+      if (!mounted) return;
+      final msg = result == null
+          ? l.orphanedCleanupAppNotReady
+          : result.files == 0
+              ? l.orphanedCleanupNoFiles
+              : l.orphanedCleanupDeleted(
+                  result.files,
+                  (result.bytes / 1024 / 1024).toStringAsFixed(1),
+                );
+      _showSnack(msg);
+      setState(() {
+        _purging = false;
+        _cacheSizeMb = null;
+        _cacheSizeLoaded = false;
+      });
+      _loadTotalCacheSize();
+    } catch (e) {
+      if (mounted) {
+        setState(() => _purging = false);
+        _showSnack('${l.error}: $e');
+      }
+    }
   }
 
   Future<void> _factoryReset() async {
@@ -1106,43 +1142,72 @@ class _SettingsTabState extends State<SettingsTab>
 
   Future<void> _pickChatBackground() async {
     try {
-      final result = await FilePicker.platform.pickFiles(type: FileType.image);
-      if (result == null) return;
-      final pickedPath = result.files.single.path;
+      final String? pickedPath;
+      if (Platform.isAndroid || Platform.isIOS) {
+        pickedPath = await showWallpaperPickerSheet(context);
+      } else {
+        final result = await FilePicker.platform.pickFiles(
+          type: FileType.custom,
+          allowedExtensions: [
+            'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif',
+            'mp4', 'mov', 'avi', 'mkv', 'webm', 'flv', 'm4v',
+          ],
+        );
+        pickedPath = result?.files.single.path;
+      }
       if (pickedPath == null) return;
+
+      final ext = p.extension(pickedPath).toLowerCase();
+      const videoExts = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.m4v'};
+      final isVideo = videoExts.contains(ext);
+
       final dir = await getApplicationSupportDirectory();
       final bgDir = Directory('${dir.path}/backgrounds');
       await bgDir.create(recursive: true);
 
-      try {
-        final files = bgDir.listSync().whereType<File>().toList();
-        for (final f in files) {
-          final name = p.basename(f.path);
-          if (name.startsWith('chat_bg')) {
-            try {
-              await f.delete();
-            } catch (e) { debugPrint('[err] $e'); }
+      if (isVideo) {
+        // Clear old video backgrounds
+        try {
+          final files = bgDir.listSync().whereType<File>().toList();
+          for (final f in files) {
+            if (p.basename(f.path).startsWith('chat_video_bg')) {
+              try { await f.delete(); } catch (e) { debugPrint('[err] $e'); }
+            }
           }
-        }
-      } catch (e) { debugPrint('[err] $e'); }
+        } catch (e) { debugPrint('[err] $e'); }
 
-      final ext = p.extension(pickedPath);
-      final dest =
-          '${bgDir.path}/chat_bg_${DateTime.now().millisecondsSinceEpoch}$ext';
-      await File(pickedPath).copy(dest);
+        final dest = '${bgDir.path}/chat_video_bg_${DateTime.now().millisecondsSinceEpoch}$ext';
+        await File(pickedPath).copy(dest);
+        await SettingsManager.setChatVideoBackground(dest);
+        await SettingsManager.setChatBackground(null);
+        _showSnack('Video wallpaper set');
+      } else {
+        // Clear old image backgrounds
+        try {
+          final files = bgDir.listSync().whereType<File>().toList();
+          for (final f in files) {
+            final name = p.basename(f.path);
+            if (name.startsWith('chat_bg') && !name.startsWith('chat_video_bg')) {
+              try { await f.delete(); } catch (e) { debugPrint('[err] $e'); }
+            }
+          }
+        } catch (e) { debugPrint('[err] $e'); }
 
-      try {
-        final prev = SettingsManager.chatBackground.value;
-        if (prev != null) {
-          await FileImage(File(prev)).evict();
-        }
-        await FileImage(File(dest)).evict();
-      } catch (e) { debugPrint('[err] $e'); }
+        final dest = '${bgDir.path}/chat_bg_${DateTime.now().millisecondsSinceEpoch}$ext';
+        await File(pickedPath).copy(dest);
 
-      await SettingsManager.setChatBackground(dest);
-      _showSnack(AppLocalizations(SettingsManager.appLocale.value).chatBgSet);
+        try {
+          final prev = SettingsManager.chatBackground.value;
+          if (prev != null) await FileImage(File(prev)).evict();
+          await FileImage(File(dest)).evict();
+        } catch (e) { debugPrint('[err] $e'); }
+
+        await SettingsManager.setChatBackground(dest);
+        await SettingsManager.setChatVideoBackground(null);
+        _showSnack(AppLocalizations(SettingsManager.appLocale.value).chatBgSet);
+      }
     } catch (e) {
-      _showSnack(' $e');
+      _showSnack('$e');
     }
   }
 
@@ -1189,6 +1254,37 @@ class _SettingsTabState extends State<SettingsTab>
 
     await SettingsManager.setChatBackground(null);
     _showSnack(clearedMsg);
+  }
+
+
+  Future<void> _clearChatVideoBackground() async {
+    try {
+      final dir = await getApplicationSupportDirectory();
+      final bgDir = Directory('${dir.path}/backgrounds');
+      if (await bgDir.exists()) {
+        for (final f in bgDir.listSync().whereType<File>()) {
+          if (p.basename(f.path).startsWith('chat_video_bg')) {
+            try { await f.delete(); } catch (e) { debugPrint('[err] $e'); }
+          }
+        }
+      }
+    } catch (e) { debugPrint('[err] $e'); }
+    await SettingsManager.setChatVideoBackground(null);
+    _showSnack('Video wallpaper cleared');
+  }
+
+  void _showPresetsSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _PresetsSheet(
+        currentTheme: widget.currentTheme,
+        isDarkMode: widget.isDarkMode,
+        onThemeChanged: widget.onThemeChanged,
+        onSnack: _showSnack,
+      ),
+    );
   }
 
   @override
@@ -1256,8 +1352,8 @@ class _SettingsTabState extends State<SettingsTab>
             const SizedBox(height: 16),
             _buildLiquidGlassSection(
               icon: Icons.headset_mic_rounded,
-              title: 'Audio',
-              subtitle: 'Microphone and speaker device selection',
+              title: AppLocalizations.of(context).audioTitle,
+              subtitle: AppLocalizations.of(context).audioSubtitle,
               section: SectionType.audio,
               expandedContent: _buildAudioContent(),
             ),
@@ -1807,13 +1903,24 @@ class _SettingsTabState extends State<SettingsTab>
                 ),
                 const SizedBox(height: 8),
                 ValueListenableBuilder<String?>(
+                  valueListenable: SettingsManager.chatVideoBackground,
+                  builder: (_, videoPath, __) {
+                  return ValueListenableBuilder<String?>(
                   valueListenable: SettingsManager.chatBackground,
                   builder: (_, path, __) {
                     final aspect = isDesktop ? (16 / 9) : (9 / 16);
                     Widget preview;
-                    if (path != null && File(path).existsSync()) {
+                    if (videoPath != null && File(videoPath).existsSync()) {
                       preview = ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
+                        borderRadius: BorderRadius.circular(12),
+                        child: AspectRatio(
+                          aspectRatio: aspect,
+                          child: _VideoPreviewWidget(path: videoPath),
+                        ),
+                      );
+                    } else if (path != null && File(path).existsSync()) {
+                      preview = ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
                         child: AspectRatio(
                           aspectRatio: aspect,
                           child: ValueListenableBuilder<bool>(
@@ -1842,7 +1949,7 @@ class _SettingsTabState extends State<SettingsTab>
                       );
                     } else {
                       preview = ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
+                        borderRadius: BorderRadius.circular(12),
                         child: AspectRatio(
                           aspectRatio: aspect,
                           child: ValueListenableBuilder<double>(
@@ -1851,13 +1958,13 @@ class _SettingsTabState extends State<SettingsTab>
                               return Container(
                                 color: Theme.of(context)
                                     .colorScheme
-                                    .surfaceVariant
+                                    .surfaceContainerHighest
                                     .withValues(alpha: opacity * 0.47),
-                                child: Icon(Icons.photo,
+                                child: Icon(Icons.photo_outlined,
                                     color: Theme.of(context)
                                         .colorScheme
                                         .onSurfaceVariant
-                                        .withValues(alpha: 0.6)),
+                                        .withValues(alpha: 0.5)),
                               );
                             },
                           ),
@@ -1869,24 +1976,34 @@ class _SettingsTabState extends State<SettingsTab>
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         SizedBox(
-                          width: isDesktop ? 320 : 140,
+                          width: isDesktop ? 320 : 160,
                           child: preview,
                         ),
                         const SizedBox(height: 12),
                         Wrap(
-                          spacing: 10,
-                          runSpacing: 10,
+                          spacing: 8,
+                          runSpacing: 8,
                           children: [
-                            _buildLiquidGlassButton(
-                              icon: Icons.photo,
+                            _buildAppleButton(
+                              icon: Icons.photo_outlined,
                               label: AppLocalizations.of(context).chooseBackground,
-                              fontSize: 14,
                               onPressed: _pickChatBackground,
                             ),
-                            TextButton(
-                              onPressed: _clearChatBackground,
-                              child: Text(AppLocalizations.of(context).clear),
+                            _buildAppleButton(
+                              icon: Icons.auto_awesome_rounded,
+                              label: AppLocalizations.of(context).presetsBackground,
+                              onPressed: _showPresetsSheet,
                             ),
+                            if (path != null || videoPath != null)
+                              _buildAppleButton(
+                                icon: Icons.close_rounded,
+                                label: AppLocalizations.of(context).clearBackground2,
+                                onPressed: () async {
+                                  await _clearChatBackground();
+                                  await _clearChatVideoBackground();
+                                },
+                                isDestructive: true,
+                              ),
                           ],
                         ),
                         const SizedBox(height: 8),
@@ -1989,6 +2106,8 @@ class _SettingsTabState extends State<SettingsTab>
                       ],
                     );
                   },
+                  );
+                  },
                 ),
                 const SizedBox(height: 12),
                 if (isDesktop)
@@ -2071,18 +2190,18 @@ class _SettingsTabState extends State<SettingsTab>
                       children: [
                         SwitchListTile(
                           contentPadding: EdgeInsets.zero,
-                          title: const Text(
-                            'Account Graph',
-                            style: TextStyle(fontWeight: FontWeight.w600),
+                          title: Text(
+                            AppLocalizations.of(context).accountGraph,
+                            style: const TextStyle(fontWeight: FontWeight.w600),
                           ),
                           subtitle: Text(
                             showGraph
                                 ? (isDesktop
-                                    ? 'Shows a graph of your chats, groups and channels when no chat is open'
-                                    : 'Swipe left from the right edge in Chats to open the graph')
+                                    ? AppLocalizations.of(context).accountGraphSubtitleDesktopOn
+                                    : AppLocalizations.of(context).accountGraphSubtitleMobileOn)
                                 : (isDesktop
-                                    ? 'Shows a hint when no chat is open'
-                                    : 'Account Graph is disabled'),
+                                    ? AppLocalizations.of(context).accountGraphSubtitleDesktopOff
+                                    : AppLocalizations.of(context).accountGraphSubtitleMobileOff),
                             style: TextStyle(
                                 fontSize: 13,
                                 color: Theme.of(context).colorScheme.onSurfaceVariant),
@@ -2095,17 +2214,18 @@ class _SettingsTabState extends State<SettingsTab>
                           ValueListenableBuilder<double>(
                             valueListenable: SettingsManager.graphOrbitSpeed,
                             builder: (_, speed, __) {
+                              final l = AppLocalizations.of(context);
                               final label = speed < 60
-                                  ? '${speed.round()} sec/orbit'
-                                  : '${(speed / 60).round()} min/orbit';
+                                  ? l.secOrbit(speed.round())
+                                  : l.minOrbit((speed / 60).round());
                               return Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Row(
                                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                     children: [
-                                      const Text('Orbit Speed',
-                                          style: TextStyle(fontWeight: FontWeight.w600)),
+                                      Text(l.orbitSpeed,
+                                          style: const TextStyle(fontWeight: FontWeight.w600)),
                                       Text(label,
                                           style: TextStyle(
                                               fontSize: 12,
@@ -2129,12 +2249,12 @@ class _SettingsTabState extends State<SettingsTab>
                             valueListenable: SettingsManager.graphAnimation,
                             builder: (_, anim, __) => SwitchListTile(
                               contentPadding: EdgeInsets.zero,
-                              title: const Text('Animate',
-                                  style: TextStyle(fontWeight: FontWeight.w600)),
+                              title: Text(AppLocalizations.of(context).animateGraph,
+                                  style: const TextStyle(fontWeight: FontWeight.w600)),
                               subtitle: Text(
                                 anim
-                                    ? 'Orbits rotate in real time'
-                                    : 'Graph is frozen / static',
+                                    ? AppLocalizations.of(context).animateGraphOn
+                                    : AppLocalizations.of(context).animateGraphOff,
                                 style: TextStyle(
                                     fontSize: 12,
                                     color: Theme.of(context)
@@ -2149,12 +2269,12 @@ class _SettingsTabState extends State<SettingsTab>
                             valueListenable: SettingsManager.graphPreservePosition,
                             builder: (_, preserve, __) => SwitchListTile(
                               contentPadding: EdgeInsets.zero,
-                              title: const Text('Preserve View',
-                                  style: TextStyle(fontWeight: FontWeight.w600)),
+                              title: Text(AppLocalizations.of(context).preserveView,
+                                  style: const TextStyle(fontWeight: FontWeight.w600)),
                               subtitle: Text(
                                 preserve
-                                    ? 'Keeps zoom & position when leaving a chat'
-                                    : 'Resets to center when returning',
+                                    ? AppLocalizations.of(context).preserveViewOn
+                                    : AppLocalizations.of(context).preserveViewOff,
                                 style: TextStyle(
                                     fontSize: 12,
                                     color: Theme.of(context)
@@ -2198,6 +2318,103 @@ class _SettingsTabState extends State<SettingsTab>
                         ],
                       );
                     },
+                  ),
+                ],
+                if (!Platform.isWindows && !Platform.isLinux) ...[
+                  const SizedBox(height: 20),
+                  const Text(
+                    'Liquid Glass Effects',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    AppLocalizations.of(context).liquidGlassSubtitle,
+                    style: const TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                  const SizedBox(height: 12),
+                  // ── Navigation Bar ────────────────────────────
+                  _buildLiquidElementSection(
+                    context: context,
+                    label: AppLocalizations.of(context).liquidGlassNavBarLabel,
+                    description: AppLocalizations.of(context).liquidGlassNavBarDesc,
+                    toggleListenable: SettingsManager.liquidGlassOnNavBar,
+                    toggleGetter: (v) => v as bool,
+                    onToggle: SettingsManager.setLiquidGlassOnNavBar,
+                    qualityNotifier: SettingsManager.liquidGlassNavBarQuality,
+                    onQualityChanged: SettingsManager.setLiquidGlassNavBarQuality,
+                    sliders: [
+                      _LiquidSliderConfig(label: 'Blur', description: 'Frosted blur intensity behind the glass', listenable: SettingsManager.liquidGlassBlur, min: 0, max: 15, divisions: 15, format: (v) => v.toStringAsFixed(0), onChanged: SettingsManager.setLiquidGlassBlur),
+                      _LiquidSliderConfig(label: 'Tint', description: 'Adaptive tint opacity (auto dark/light)', listenable: SettingsManager.liquidGlassTint, min: 0, max: 0.30, divisions: 30, format: (v) => '${(v * 100).toStringAsFixed(0)}%', onChanged: SettingsManager.setLiquidGlassTint),
+                      _LiquidSliderConfig(label: 'Saturation', description: 'Color vibrancy picked up from background', listenable: SettingsManager.liquidGlassSaturation, min: 0.3, max: 2.0, divisions: 17, format: (v) => v.toStringAsFixed(1), onChanged: SettingsManager.setLiquidGlassSaturation),
+                      _LiquidSliderConfig(label: 'Chromatic Aberration', description: 'Color fringing on glass edges (lens effect)', listenable: SettingsManager.liquidGlassChromatic, min: 0, max: 1.0, divisions: 20, format: (v) => v.toStringAsFixed(2), onChanged: SettingsManager.setLiquidGlassChromatic),
+                      _LiquidSliderConfig(label: 'Refractive Index', description: 'How much the glass bends light behind it', listenable: SettingsManager.liquidGlassRefractive, min: 1.0, max: 2.5, divisions: 15, format: (v) => v.toStringAsFixed(2), onChanged: SettingsManager.setLiquidGlassRefractive),
+                      _LiquidSliderConfig(label: 'Light Intensity', description: 'Strength of the specular highlight on glass', listenable: SettingsManager.liquidGlassLightIntensity, min: 0, max: 1.0, divisions: 20, format: (v) => v.toStringAsFixed(2), onChanged: SettingsManager.setLiquidGlassLightIntensity),
+                      _LiquidSliderConfig(label: 'Thickness', description: 'Glass depth — affects refraction and edge glow', listenable: SettingsManager.liquidGlassThickness, min: 0, max: 60, divisions: 12, format: (v) => v.toStringAsFixed(0), onChanged: SettingsManager.setLiquidGlassThickness),
+                      _LiquidSliderConfig(label: 'Jelly Stretch Amount', description: 'Indicator expansion when dragging between tabs', listenable: SettingsManager.liquidGlassExpansion, min: 0, max: 28, divisions: 28, format: (v) => v.toStringAsFixed(0), onChanged: SettingsManager.setLiquidGlassExpansion),
+                    ],
+                  ),
+                  // ── Cards & List Items ────────────────────────
+                  const SizedBox(height: 12),
+                  _buildLiquidElementSection(
+                    context: context,
+                    label: AppLocalizations.of(context).liquidGlassCardsLabel,
+                    description: AppLocalizations.of(context).liquidGlassCardsDesc,
+                    toggleListenable: SettingsManager.liquidGlassOnCards,
+                    toggleGetter: (v) => v as bool,
+                    onToggle: SettingsManager.setLiquidGlassOnCards,
+                    qualityNotifier: SettingsManager.liquidGlassCardsQuality,
+                    onQualityChanged: SettingsManager.setLiquidGlassCardsQuality,
+                    sliders: [
+                      _LiquidSliderConfig(label: 'Blur', description: 'Frosted blur intensity behind the glass', listenable: SettingsManager.liquidGlassCardsBlur, min: 0, max: 15, divisions: 15, format: (v) => v.toStringAsFixed(0), onChanged: SettingsManager.setLiquidGlassCardsBlur),
+                      _LiquidSliderConfig(label: 'Tint', description: 'Adaptive tint opacity (auto dark/light)', listenable: SettingsManager.liquidGlassCardsTint, min: 0, max: 0.30, divisions: 30, format: (v) => '${(v * 100).toStringAsFixed(0)}%', onChanged: SettingsManager.setLiquidGlassCardsTint),
+                      _LiquidSliderConfig(label: 'Saturation', description: 'Color vibrancy picked up from background', listenable: SettingsManager.liquidGlassCardsSaturation, min: 0.3, max: 2.0, divisions: 17, format: (v) => v.toStringAsFixed(1), onChanged: SettingsManager.setLiquidGlassCardsSaturation),
+                      _LiquidSliderConfig(label: 'Chromatic Aberration', description: 'Color fringing on glass edges (lens effect)', listenable: SettingsManager.liquidGlassCardsChromatic, min: 0, max: 1.0, divisions: 20, format: (v) => v.toStringAsFixed(2), onChanged: SettingsManager.setLiquidGlassCardsChromatic),
+                      _LiquidSliderConfig(label: 'Refractive Index', description: 'How much the glass bends light behind it', listenable: SettingsManager.liquidGlassCardsRefractive, min: 1.0, max: 2.5, divisions: 15, format: (v) => v.toStringAsFixed(2), onChanged: SettingsManager.setLiquidGlassCardsRefractive),
+                      _LiquidSliderConfig(label: 'Light Intensity', description: 'Strength of the specular highlight on glass', listenable: SettingsManager.liquidGlassCardsLightIntensity, min: 0, max: 1.0, divisions: 20, format: (v) => v.toStringAsFixed(2), onChanged: SettingsManager.setLiquidGlassCardsLightIntensity),
+                      _LiquidSliderConfig(label: 'Thickness', description: 'Glass depth — affects refraction and edge glow', listenable: SettingsManager.liquidGlassCardsThickness, min: 0, max: 60, divisions: 12, format: (v) => v.toStringAsFixed(0), onChanged: SettingsManager.setLiquidGlassCardsThickness),
+                    ],
+                  ),
+                  // ── Input Bar ─────────────────────────────────
+                  const SizedBox(height: 12),
+                  _buildLiquidElementSection(
+                    context: context,
+                    label: AppLocalizations.of(context).liquidGlassInputLabel,
+                    description: AppLocalizations.of(context).liquidGlassInputDesc,
+                    toggleListenable: SettingsManager.liquidGlassOnInput,
+                    toggleGetter: (v) => v as bool,
+                    onToggle: SettingsManager.setLiquidGlassOnInput,
+                    qualityNotifier: SettingsManager.liquidGlassInputQuality,
+                    onQualityChanged: SettingsManager.setLiquidGlassInputQuality,
+                    sliders: [
+                      _LiquidSliderConfig(label: 'Blur', description: 'Frosted blur intensity behind the glass', listenable: SettingsManager.liquidGlassInputBlur, min: 0, max: 15, divisions: 15, format: (v) => v.toStringAsFixed(0), onChanged: SettingsManager.setLiquidGlassInputBlur),
+                      _LiquidSliderConfig(label: 'Tint', description: 'Adaptive tint opacity (auto dark/light)', listenable: SettingsManager.liquidGlassInputTint, min: 0, max: 0.30, divisions: 30, format: (v) => '${(v * 100).toStringAsFixed(0)}%', onChanged: SettingsManager.setLiquidGlassInputTint),
+                      _LiquidSliderConfig(label: 'Saturation', description: 'Color vibrancy picked up from background', listenable: SettingsManager.liquidGlassInputSaturation, min: 0.3, max: 2.0, divisions: 17, format: (v) => v.toStringAsFixed(1), onChanged: SettingsManager.setLiquidGlassInputSaturation),
+                      _LiquidSliderConfig(label: 'Chromatic Aberration', description: 'Color fringing on glass edges (lens effect)', listenable: SettingsManager.liquidGlassInputChromatic, min: 0, max: 1.0, divisions: 20, format: (v) => v.toStringAsFixed(2), onChanged: SettingsManager.setLiquidGlassInputChromatic),
+                      _LiquidSliderConfig(label: 'Refractive Index', description: 'How much the glass bends light behind it', listenable: SettingsManager.liquidGlassInputRefractive, min: 1.0, max: 2.5, divisions: 15, format: (v) => v.toStringAsFixed(2), onChanged: SettingsManager.setLiquidGlassInputRefractive),
+                      _LiquidSliderConfig(label: 'Light Intensity', description: 'Strength of the specular highlight on glass', listenable: SettingsManager.liquidGlassInputLightIntensity, min: 0, max: 1.0, divisions: 20, format: (v) => v.toStringAsFixed(2), onChanged: SettingsManager.setLiquidGlassInputLightIntensity),
+                      _LiquidSliderConfig(label: 'Thickness', description: 'Glass depth — affects refraction and edge glow', listenable: SettingsManager.liquidGlassInputThickness, min: 0, max: 60, divisions: 12, format: (v) => v.toStringAsFixed(0), onChanged: SettingsManager.setLiquidGlassInputThickness),
+                    ],
+                  ),
+                  // ── Search ────────────────────────────────────
+                  const SizedBox(height: 12),
+                  _buildLiquidElementSection(
+                    context: context,
+                    label: AppLocalizations.of(context).liquidGlassSearchLabel,
+                    description: AppLocalizations.of(context).liquidGlassSearchDesc,
+                    toggleListenable: SettingsManager.liquidGlassOnSearch,
+                    toggleGetter: (v) => v as bool,
+                    onToggle: SettingsManager.setLiquidGlassOnSearch,
+                    qualityNotifier: SettingsManager.liquidGlassSearchQuality,
+                    onQualityChanged: SettingsManager.setLiquidGlassSearchQuality,
+                    sliders: [
+                      _LiquidSliderConfig(label: 'Blur', description: 'Frosted blur intensity behind the glass', listenable: SettingsManager.liquidGlassSearchBlur, min: 0, max: 15, divisions: 15, format: (v) => v.toStringAsFixed(0), onChanged: SettingsManager.setLiquidGlassSearchBlur),
+                      _LiquidSliderConfig(label: 'Tint', description: 'Adaptive tint opacity (auto dark/light)', listenable: SettingsManager.liquidGlassSearchTint, min: 0, max: 0.30, divisions: 30, format: (v) => '${(v * 100).toStringAsFixed(0)}%', onChanged: SettingsManager.setLiquidGlassSearchTint),
+                      _LiquidSliderConfig(label: 'Saturation', description: 'Color vibrancy picked up from background', listenable: SettingsManager.liquidGlassSearchSaturation, min: 0.3, max: 2.0, divisions: 17, format: (v) => v.toStringAsFixed(1), onChanged: SettingsManager.setLiquidGlassSearchSaturation),
+                      _LiquidSliderConfig(label: 'Chromatic Aberration', description: 'Color fringing on glass edges (lens effect)', listenable: SettingsManager.liquidGlassSearchChromatic, min: 0, max: 1.0, divisions: 20, format: (v) => v.toStringAsFixed(2), onChanged: SettingsManager.setLiquidGlassSearchChromatic),
+                      _LiquidSliderConfig(label: 'Refractive Index', description: 'How much the glass bends light behind it', listenable: SettingsManager.liquidGlassSearchRefractive, min: 1.0, max: 2.5, divisions: 15, format: (v) => v.toStringAsFixed(2), onChanged: SettingsManager.setLiquidGlassSearchRefractive),
+                      _LiquidSliderConfig(label: 'Light Intensity', description: 'Strength of the specular highlight on glass', listenable: SettingsManager.liquidGlassSearchLightIntensity, min: 0, max: 1.0, divisions: 20, format: (v) => v.toStringAsFixed(2), onChanged: SettingsManager.setLiquidGlassSearchLightIntensity),
+                      _LiquidSliderConfig(label: 'Thickness', description: 'Glass depth — affects refraction and edge glow', listenable: SettingsManager.liquidGlassSearchThickness, min: 0, max: 60, divisions: 12, format: (v) => v.toStringAsFixed(0), onChanged: SettingsManager.setLiquidGlassSearchThickness),
+                    ],
                   ),
                 ],
               ],
@@ -2271,7 +2488,7 @@ class _SettingsTabState extends State<SettingsTab>
           
           Center( 
             child: Text(
-              'open-beta 1.5',
+              'open-beta 1.6',
               style: TextStyle(
                 fontSize: 12,
                 color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.55),
@@ -3416,6 +3633,7 @@ class _SettingsTabState extends State<SettingsTab>
           style: const TextStyle(fontSize: 14, color: Colors.grey),
         ),
         const SizedBox(height: 16),
+        const SizedBox(height: 8),
         _buildLiquidGlassButton(
           icon: Icons.manage_accounts_rounded,
           label: AppLocalizations.of(context).statusSettings,
@@ -3611,6 +3829,13 @@ class _SettingsTabState extends State<SettingsTab>
           fontSize: 14,
           onPressed: _openCacheManager,
         ),
+        const SizedBox(height: 8),
+        _buildLiquidGlassButton(
+          icon: _purging ? Icons.hourglass_top_rounded : Icons.auto_delete_rounded,
+          label: _purging ? l.cleaningUnusedFiles : l.cleanUnusedFiles,
+          fontSize: 14,
+          onPressed: _purging ? null : _purgeOrphanedCache,
+        ),
         const SizedBox(height: 16),
         const Divider(),
         const SizedBox(height: 12),
@@ -3691,6 +3916,7 @@ class _SettingsTabState extends State<SettingsTab>
 
   Widget _buildAudioContent() {
     final colorScheme = Theme.of(context).colorScheme;
+    final l = AppLocalizations.of(context);
     if (_audioDevices == null) {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: 16),
@@ -3745,7 +3971,7 @@ class _SettingsTabState extends State<SettingsTab>
                       DropdownMenuItem(
                         value: '',
                         child: Text(
-                          'System default',
+                          l.audioSystemDefault,
                           style: TextStyle(fontSize: 13, color: colorScheme.onSurface.withValues(alpha: 0.55)),
                         ),
                       ),
@@ -3772,7 +3998,7 @@ class _SettingsTabState extends State<SettingsTab>
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         deviceDropdown(
-          label: 'Microphone (input)',
+          label: l.audioMicInput,
           icon: Icons.mic_rounded,
           deviceList: inputs,
           notifier: SettingsManager.audioInputDeviceId,
@@ -3781,7 +4007,7 @@ class _SettingsTabState extends State<SettingsTab>
         if (outputs.isNotEmpty) ...[
           const SizedBox(height: 16),
           deviceDropdown(
-            label: 'Speaker (output)',
+            label: l.audioSpeakerOutput,
             icon: Icons.volume_up_rounded,
             deviceList: outputs,
             notifier: SettingsManager.audioOutputDeviceId,
@@ -3790,10 +4016,184 @@ class _SettingsTabState extends State<SettingsTab>
         ],
         const SizedBox(height: 8),
         Text(
-          'Changes take effect on the next voice channel join.',
+          l.audioChangesNote,
           style: TextStyle(fontSize: 12, color: colorScheme.onSurface.withValues(alpha: 0.5)),
         ),
       ],
+    );
+  }
+
+  Widget _buildLiquidElementSection({
+    required BuildContext context,
+    required String label,
+    required String description,
+    required ValueListenable<dynamic> toggleListenable,
+    required bool Function(dynamic) toggleGetter,
+    required Future<void> Function(bool) onToggle,
+    required List<_LiquidItem> sliders,
+    ValueNotifier<LiquidGlassQuality>? qualityNotifier,
+    Future<void> Function(LiquidGlassQuality)? onQualityChanged,
+  }) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return ValueListenableBuilder(
+      valueListenable: toggleListenable,
+      builder: (_, val, __) {
+        final enabled = toggleGetter(val);
+        return Container(
+          decoration: BoxDecoration(
+            color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: enabled
+                  ? colorScheme.primary.withValues(alpha: 0.3)
+                  : colorScheme.outlineVariant.withValues(alpha: 0.15),
+              width: 1,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(label, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                          Text(description, style: TextStyle(fontSize: 11, color: colorScheme.onSurface.withValues(alpha: 0.5))),
+                        ],
+                      ),
+                    ),
+                    Switch(value: enabled, onChanged: onToggle),
+                  ],
+                ),
+              ),
+              if (enabled) ...[
+                Divider(height: 1, color: colorScheme.outlineVariant.withValues(alpha: 0.2)),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (qualityNotifier != null && onQualityChanged != null) ...[
+                        const Text('Glass Quality', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
+                        const SizedBox(height: 6),
+                        ValueListenableBuilder<LiquidGlassQuality>(
+                          valueListenable: qualityNotifier,
+                          builder: (_, currentQuality, __) {
+                            final primary = colorScheme.primary;
+                            final surface = colorScheme.surfaceContainerHighest;
+                            return Row(
+                              children: LiquidGlassQuality.values.map((q) {
+                                final sel = q == currentQuality;
+                                final (lbl, sub) = switch (q) {
+                                  LiquidGlassQuality.fast    => ('Fast',    'Lightweight\nBest perf'),
+                                  LiquidGlassQuality.medium  => ('Medium',  'No shaders\nBlur only'),
+                                  LiquidGlassQuality.quality => ('Quality', 'Full shaders\nBest visuals'),
+                                };
+                                return Expanded(
+                                  child: GestureDetector(
+                                    onTap: () => onQualityChanged(q),
+                                    child: AnimatedContainer(
+                                      duration: const Duration(milliseconds: 200),
+                                      margin: const EdgeInsets.only(right: 6),
+                                      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+                                      decoration: BoxDecoration(
+                                        color: sel ? primary.withValues(alpha: 0.15) : surface.withValues(alpha: 0.5),
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(color: sel ? primary : Colors.transparent, width: 1.5),
+                                      ),
+                                      child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Text(lbl, style: TextStyle(fontSize: 11, fontWeight: sel ? FontWeight.bold : FontWeight.w500, color: sel ? primary : null)),
+                                          const SizedBox(height: 2),
+                                          Text(sub, textAlign: TextAlign.center, style: const TextStyle(fontSize: 9, color: Colors.grey), maxLines: 2),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }).toList(),
+                            );
+                          },
+                        ),
+                        const SizedBox(height: 10),
+                        Divider(height: 1, color: colorScheme.outlineVariant.withValues(alpha: 0.2)),
+                        const SizedBox(height: 8),
+                      ],
+                      ...sliders.map((item) => _buildLiquidItem(context: context, item: item)),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildLiquidItem({required BuildContext context, required _LiquidItem item}) {
+    return switch (item) {
+      _LiquidSliderConfig config => _buildLiquidSlider(context: context, config: config),
+      _LiquidToggleItem toggle => _buildInlineLiquidToggle(context: context, item: toggle),
+    };
+  }
+
+  Widget _buildLiquidSlider({
+    required BuildContext context,
+    required _LiquidSliderConfig config,
+  }) {
+    return ValueListenableBuilder<double>(
+      valueListenable: config.listenable,
+      builder: (_, value, __) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(config.label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+              Text(config.format(value), style: const TextStyle(fontSize: 12, color: Colors.grey)),
+            ],
+          ),
+          const SizedBox(height: 2),
+          Text(config.description, style: const TextStyle(fontSize: 11, color: Colors.grey)),
+          Slider(
+            min: config.min,
+            max: config.max,
+            divisions: config.divisions,
+            value: value,
+            onChanged: config.onChanged,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInlineLiquidToggle({required BuildContext context, required _LiquidToggleItem item}) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return ValueListenableBuilder<bool>(
+      valueListenable: item.listenable,
+      builder: (_, value, __) => Padding(
+        padding: const EdgeInsets.only(bottom: 4),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(item.label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                  Text(item.description, style: TextStyle(fontSize: 11, color: colorScheme.onSurface.withValues(alpha: 0.5))),
+                ],
+              ),
+            ),
+            Switch(value: value, onChanged: item.onChanged),
+          ],
+        ),
+      ),
     );
   }
 
@@ -3807,32 +4207,14 @@ class _SettingsTabState extends State<SettingsTab>
     final isExpanded = _expandedSection == section;
     final colorScheme = Theme.of(context).colorScheme;
 
-    return ValueListenableBuilder<double>(
-      valueListenable: SettingsManager.elementOpacity,
-      builder: (_, opacity, __) {
-        return ValueListenableBuilder<double>(
-          valueListenable: SettingsManager.elementBrightness,
-          builder: (_, brightness, ___) {
-            final baseColor = SettingsManager.getElementColor(
-              colorScheme.surfaceContainerHighest,
-              brightness,
-            );
-            return ClipRRect(
-              borderRadius: BorderRadius.circular(16),
-              child: Container(
-                decoration: BoxDecoration(
-                  color: baseColor.withValues(alpha: opacity),
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(
-                    color: colorScheme.outlineVariant.withValues(alpha: 0.15),
-                    width: 0.8,
-                  ),
-                ),
-            child: Column(
-              children: [
-                InkWell(
-                  borderRadius: BorderRadius.circular(16),
-                  onTap: () => _toggleSection(section),
+    return AdaptiveGlassCard(
+      borderRadius: 16,
+      padding: EdgeInsets.zero,
+      child: Column(
+        children: [
+          InkWell(
+            borderRadius: BorderRadius.circular(16),
+            onTap: () => _toggleSection(section),
                   child: Padding(
                     padding: const EdgeInsets.all(16),
                     child: Row(
@@ -3904,11 +4286,6 @@ class _SettingsTabState extends State<SettingsTab>
                 ),
               ],
             ),
-          ),
-        );
-          },
-        );
-      },
     );
   }
 
@@ -3936,6 +4313,55 @@ class _SettingsTabState extends State<SettingsTab>
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildAppleButton({
+    required IconData icon,
+    required String label,
+    required VoidCallback? onPressed,
+    bool isDestructive = false,
+  }) {
+    final cs = Theme.of(context).colorScheme;
+    final color = isDestructive
+        ? Colors.red.shade400
+        : cs.onSurface.withValues(alpha: 0.85);
+    final bgColor = isDestructive
+        ? Colors.red.withValues(alpha: 0.10)
+        : cs.surfaceContainerHighest.withValues(alpha: 0.55);
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: onPressed,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          decoration: BoxDecoration(
+            color: bgColor,
+            borderRadius: BorderRadius.circular(50),
+            border: Border.all(
+              color: (isDestructive ? Colors.red : cs.outlineVariant)
+                  .withValues(alpha: 0.22),
+              width: 0.8,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 16, color: color),
+              const SizedBox(width: 6),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: color,
+                  letterSpacing: -0.1,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -4001,3 +4427,551 @@ class _SettingsTabState extends State<SettingsTab>
 }
 
 enum SectionType { security, keyManagement, notifications, appearance, language, cache, connection, proxy, interact, debug, contact, blockedUsers, audio }
+
+// ── Video preview for wallpaper settings ─────────────────────────────────────
+
+class _VideoPreviewWidget extends StatefulWidget {
+  final String path;
+  const _VideoPreviewWidget({required this.path});
+
+  @override
+  State<_VideoPreviewWidget> createState() => _VideoPreviewWidgetState();
+}
+
+class _VideoPreviewWidgetState extends State<_VideoPreviewWidget> {
+  late final Player _player;
+  late final VideoController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _player = Player();
+    _controller = VideoController(_player);
+    _player.setPlaylistMode(PlaylistMode.single);
+    _player.open(Media(widget.path), play: false);
+  }
+
+  @override
+  void dispose() {
+    _player.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Video(controller: _controller, fit: BoxFit.cover, controls: NoVideoControls),
+        Positioned(
+          bottom: 6,
+          right: 6,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+            decoration: BoxDecoration(
+              color: Colors.black54,
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.videocam, size: 12, color: Colors.white),
+                SizedBox(width: 4),
+                Text('Video', style: TextStyle(fontSize: 10, color: Colors.white)),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ── Theme Presets Sheet ───────────────────────────────────────────────────────
+
+class _PresetsSheet extends StatefulWidget {
+  final AppTheme currentTheme;
+  final bool isDarkMode;
+  final Future<void> Function(AppTheme, bool) onThemeChanged;
+  final void Function(String) onSnack;
+
+  const _PresetsSheet({
+    required this.currentTheme,
+    required this.isDarkMode,
+    required this.onThemeChanged,
+    required this.onSnack,
+  });
+
+  @override
+  State<_PresetsSheet> createState() => _PresetsSheetState();
+}
+
+class _PresetsSheetState extends State<_PresetsSheet> {
+  final _nameCtrl = TextEditingController();
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final name = _nameCtrl.text.trim();
+    if (name.isEmpty) {
+      widget.onSnack('Enter a preset name');
+      return;
+    }
+
+    // Copy wallpaper/video to stable preset_wallpapers/ dir so they survive
+    // when the user later picks a new background (which deletes chat_bg* files)
+    String? stableWallpaper;
+    String? stableVideo;
+    try {
+      final dir = await getApplicationSupportDirectory();
+      final wpDir = Directory('${dir.path}/preset_wallpapers');
+      await wpDir.create(recursive: true);
+
+      final wallpaperPath = SettingsManager.chatBackground.value;
+      if (wallpaperPath != null) {
+        final src = File(wallpaperPath);
+        if (await src.exists()) {
+          final ext = p.extension(wallpaperPath);
+          final dest = '${wpDir.path}/wp_${DateTime.now().millisecondsSinceEpoch}$ext';
+          await src.copy(dest);
+          stableWallpaper = dest;
+        }
+      }
+
+      final videoPath = SettingsManager.chatVideoBackground.value;
+      if (videoPath != null) {
+        final src = File(videoPath);
+        if (await src.exists()) {
+          final ext = p.extension(videoPath);
+          final dest = '${wpDir.path}/vid_${DateTime.now().millisecondsSinceEpoch}$ext';
+          await src.copy(dest);
+          stableVideo = dest;
+        }
+      }
+    } catch (e) {
+      debugPrint('[preset save] $e');
+    }
+
+    final preset = <String, dynamic>{
+      'name': name,
+      'theme': widget.currentTheme.name,
+      'isDark': widget.isDarkMode,
+      'wallpaper': stableWallpaper,
+      'video': stableVideo,
+      // UI elements
+      'elementOpacity': SettingsManager.elementOpacity.value,
+      'elementBrightness': SettingsManager.elementBrightness.value,
+      // Liquid glass — navbar
+      'lgOnNavBar': SettingsManager.liquidGlassOnNavBar.value,
+      'lgNavBarQuality': SettingsManager.liquidGlassNavBarQuality.value.name,
+      // Liquid glass — main
+      'lgQuality': SettingsManager.liquidGlassQuality.value.name,
+      'lgExpansion': SettingsManager.liquidGlassExpansion.value,
+      'lgBlur': SettingsManager.liquidGlassBlur.value,
+      'lgTint': SettingsManager.liquidGlassTint.value,
+      'lgSaturation': SettingsManager.liquidGlassSaturation.value,
+      'lgChromatic': SettingsManager.liquidGlassChromatic.value,
+      'lgRefractive': SettingsManager.liquidGlassRefractive.value,
+      'lgLightIntensity': SettingsManager.liquidGlassLightIntensity.value,
+      'lgThickness': SettingsManager.liquidGlassThickness.value,
+      'lgJelly': SettingsManager.liquidGlassJellyEnabled.value,
+      // Liquid glass — cards
+      'lgOnCards': SettingsManager.liquidGlassOnCards.value,
+      'lgCardsQuality': SettingsManager.liquidGlassCardsQuality.value.name,
+      'lgCardsBlur': SettingsManager.liquidGlassCardsBlur.value,
+      'lgCardsTint': SettingsManager.liquidGlassCardsTint.value,
+      'lgCardsSaturation': SettingsManager.liquidGlassCardsSaturation.value,
+      'lgCardsChromatic': SettingsManager.liquidGlassCardsChromatic.value,
+      'lgCardsRefractive': SettingsManager.liquidGlassCardsRefractive.value,
+      'lgCardsLightIntensity': SettingsManager.liquidGlassCardsLightIntensity.value,
+      'lgCardsThickness': SettingsManager.liquidGlassCardsThickness.value,
+      // Liquid glass — input
+      'lgOnInput': SettingsManager.liquidGlassOnInput.value,
+      'lgInputQuality': SettingsManager.liquidGlassInputQuality.value.name,
+      'lgInputBlur': SettingsManager.liquidGlassInputBlur.value,
+      'lgInputTint': SettingsManager.liquidGlassInputTint.value,
+      'lgInputSaturation': SettingsManager.liquidGlassInputSaturation.value,
+      'lgInputChromatic': SettingsManager.liquidGlassInputChromatic.value,
+      'lgInputRefractive': SettingsManager.liquidGlassInputRefractive.value,
+      'lgInputLightIntensity': SettingsManager.liquidGlassInputLightIntensity.value,
+      'lgInputThickness': SettingsManager.liquidGlassInputThickness.value,
+      // Liquid glass — search
+      'lgOnSearch': SettingsManager.liquidGlassOnSearch.value,
+      'lgSearchQuality': SettingsManager.liquidGlassSearchQuality.value.name,
+      'lgSearchBlur': SettingsManager.liquidGlassSearchBlur.value,
+      'lgSearchTint': SettingsManager.liquidGlassSearchTint.value,
+      'lgSearchSaturation': SettingsManager.liquidGlassSearchSaturation.value,
+      'lgSearchChromatic': SettingsManager.liquidGlassSearchChromatic.value,
+      'lgSearchRefractive': SettingsManager.liquidGlassSearchRefractive.value,
+      'lgSearchLightIntensity': SettingsManager.liquidGlassSearchLightIntensity.value,
+      'lgSearchThickness': SettingsManager.liquidGlassSearchThickness.value,
+    };
+    await SettingsManager.saveThemePreset(preset);
+    _nameCtrl.clear();
+    widget.onSnack('Preset "$name" saved');
+  }
+
+  Future<void> _apply(Map<String, dynamic> preset) async {
+    try {
+      // helpers
+      String normalize(String s) =>
+          s.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+      LiquidGlassQuality qualityByName(String? n) =>
+          LiquidGlassQuality.values.firstWhere(
+            (e) => e.name == (n ?? ''),
+            orElse: () => LiquidGlassQuality.quality,
+          );
+      double d(String key, double fallback) =>
+          (preset[key] as num?)?.toDouble() ?? fallback;
+      bool b(String key, bool fallback) =>
+          (preset[key] as bool?) ?? fallback;
+
+      // Theme
+      final themeName = preset['theme'] as String? ?? '';
+      final isDark = preset['isDark'] as bool? ?? true;
+      final theme = AppTheme.values.firstWhere(
+        (t) => normalize(t.name) == normalize(themeName),
+        orElse: () => AppTheme.deepPurple,
+      );
+      await widget.onThemeChanged(theme, isDark);
+
+      // Wallpaper
+      await SettingsManager.setChatBackground(preset['wallpaper'] as String?);
+      await SettingsManager.setChatVideoBackground(preset['video'] as String?);
+
+      // UI elements
+      await SettingsManager.setElementOpacity(d('elementOpacity', 0.5));
+      await SettingsManager.setElementBrightness(d('elementBrightness', 0.35));
+
+      // Liquid glass — navbar
+      await SettingsManager.setLiquidGlassOnNavBar(b('lgOnNavBar', true));
+      await SettingsManager.setLiquidGlassNavBarQuality(
+          qualityByName(preset['lgNavBarQuality'] as String?));
+
+      // Liquid glass — main
+      await SettingsManager.setLiquidGlassQuality(
+          qualityByName(preset['lgQuality'] as String?));
+      await SettingsManager.setLiquidGlassExpansion(d('lgExpansion', 14.0));
+      await SettingsManager.setLiquidGlassBlur(d('lgBlur', 7.0));
+      await SettingsManager.setLiquidGlassTint(d('lgTint', 0.10));
+      await SettingsManager.setLiquidGlassSaturation(d('lgSaturation', 1.0));
+      await SettingsManager.setLiquidGlassChromatic(d('lgChromatic', 0.30));
+      await SettingsManager.setLiquidGlassRefractive(d('lgRefractive', 1.59));
+      await SettingsManager.setLiquidGlassLightIntensity(d('lgLightIntensity', 0.60));
+      await SettingsManager.setLiquidGlassThickness(d('lgThickness', 30.0));
+      await SettingsManager.setLiquidGlassJellyEnabled(b('lgJelly', true));
+
+      // Liquid glass — cards
+      await SettingsManager.setLiquidGlassOnCards(b('lgOnCards', true));
+      await SettingsManager.setLiquidGlassCardsQuality(
+          qualityByName(preset['lgCardsQuality'] as String?));
+      await SettingsManager.setLiquidGlassCardsBlur(d('lgCardsBlur', 7.0));
+      await SettingsManager.setLiquidGlassCardsTint(d('lgCardsTint', 0.10));
+      await SettingsManager.setLiquidGlassCardsSaturation(d('lgCardsSaturation', 1.0));
+      await SettingsManager.setLiquidGlassCardsChromatic(d('lgCardsChromatic', 0.15));
+      await SettingsManager.setLiquidGlassCardsRefractive(d('lgCardsRefractive', 1.40));
+      await SettingsManager.setLiquidGlassCardsLightIntensity(d('lgCardsLightIntensity', 0.50));
+      await SettingsManager.setLiquidGlassCardsThickness(d('lgCardsThickness', 20.0));
+
+      // Liquid glass — input
+      await SettingsManager.setLiquidGlassOnInput(b('lgOnInput', true));
+      await SettingsManager.setLiquidGlassInputQuality(
+          qualityByName(preset['lgInputQuality'] as String?));
+      await SettingsManager.setLiquidGlassInputBlur(d('lgInputBlur', 7.0));
+      await SettingsManager.setLiquidGlassInputTint(d('lgInputTint', 0.10));
+      await SettingsManager.setLiquidGlassInputSaturation(d('lgInputSaturation', 1.0));
+      await SettingsManager.setLiquidGlassInputChromatic(d('lgInputChromatic', 0.15));
+      await SettingsManager.setLiquidGlassInputRefractive(d('lgInputRefractive', 1.40));
+      await SettingsManager.setLiquidGlassInputLightIntensity(d('lgInputLightIntensity', 0.50));
+      await SettingsManager.setLiquidGlassInputThickness(d('lgInputThickness', 20.0));
+
+      // Liquid glass — search
+      await SettingsManager.setLiquidGlassOnSearch(b('lgOnSearch', false));
+      await SettingsManager.setLiquidGlassSearchQuality(
+          qualityByName(preset['lgSearchQuality'] as String?));
+      await SettingsManager.setLiquidGlassSearchBlur(d('lgSearchBlur', 7.0));
+      await SettingsManager.setLiquidGlassSearchTint(d('lgSearchTint', 0.10));
+      await SettingsManager.setLiquidGlassSearchSaturation(d('lgSearchSaturation', 1.0));
+      await SettingsManager.setLiquidGlassSearchChromatic(d('lgSearchChromatic', 0.15));
+      await SettingsManager.setLiquidGlassSearchRefractive(d('lgSearchRefractive', 1.40));
+      await SettingsManager.setLiquidGlassSearchLightIntensity(d('lgSearchLightIntensity', 0.50));
+      await SettingsManager.setLiquidGlassSearchThickness(d('lgSearchThickness', 24.0));
+
+      widget.onSnack('Preset "${preset['name']}" applied');
+    } catch (e) {
+      widget.onSnack('Error: $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+
+    return DraggableScrollableSheet(
+      initialChildSize: 0.6,
+      minChildSize: 0.4,
+      maxChildSize: 0.92,
+      expand: false,
+      builder: (_, scrollCtrl) {
+        return Container(
+          margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+          decoration: BoxDecoration(
+            color: cs.surface,
+            borderRadius: BorderRadius.circular(24),
+          ),
+          child: Column(
+            children: [
+              const SizedBox(height: 8),
+              Container(
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: cs.onSurface.withValues(alpha: 0.2),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: Row(
+                  children: [
+                    Icon(Icons.auto_awesome_rounded, size: 20, color: cs.primary),
+                    const SizedBox(width: 10),
+                    Text(
+                      'Theme Presets',
+                      style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: cs.onSurface),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 4),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: Text(
+                  'Save and apply combinations of theme, color scheme and wallpaper.',
+                  style: TextStyle(fontSize: 12, color: cs.onSurface.withValues(alpha: 0.5)),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _nameCtrl,
+                        style: const TextStyle(fontSize: 14),
+                        decoration: InputDecoration(
+                          hintText: 'Preset name…',
+                          filled: true,
+                          fillColor: cs.surfaceContainerHighest.withValues(alpha: 0.5),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(50),
+                            borderSide: BorderSide.none,
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                          isDense: true,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    GestureDetector(
+                      onTap: _save,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                        decoration: BoxDecoration(
+                          color: cs.primary,
+                          borderRadius: BorderRadius.circular(50),
+                        ),
+                        child: Text(
+                          'Save',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: cs.onPrimary,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: Text(
+                  'Current: ${widget.currentTheme.name} • ${widget.isDarkMode ? "Dark" : "Light"}',
+                  style: TextStyle(fontSize: 11, color: cs.onSurface.withValues(alpha: 0.45)),
+                ),
+              ),
+              const Divider(height: 24),
+              Expanded(
+                child: ValueListenableBuilder<List<Map<String, dynamic>>>(
+                  valueListenable: SettingsManager.themePresets,
+                  builder: (_, presets, __) {
+                    if (presets.isEmpty) {
+                      return Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.palette_outlined, size: 40, color: cs.onSurface.withValues(alpha: 0.25)),
+                            const SizedBox(height: 8),
+                            Text(
+                              'No presets yet',
+                              style: TextStyle(fontSize: 14, color: cs.onSurface.withValues(alpha: 0.4)),
+                            ),
+                          ],
+                        ),
+                      );
+                    }
+                    return ListView.builder(
+                      controller: scrollCtrl,
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                      itemCount: presets.length,
+                      itemBuilder: (_, i) {
+                        final p = presets[i];
+                        final hasWallpaper = (p['wallpaper'] as String?) != null;
+                        final hasVideo = (p['video'] as String?) != null;
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
+                              borderRadius: BorderRadius.circular(16),
+                              border: Border.all(color: cs.outlineVariant.withValues(alpha: 0.2)),
+                            ),
+                            child: ListTile(
+                              contentPadding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                              leading: () {
+                                final wallpaperPath = p['wallpaper'] as String?;
+                                final videoPath = p['video'] as String?;
+                                final themeName = p['theme'] as String? ?? '';
+                                String normalize(String s) =>
+                                    s.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+                                final themeColor = AppTheme.values.firstWhere(
+                                  (t) => normalize(t.name) == normalize(themeName),
+                                  orElse: () => AppTheme.deepPurple,
+                                ).color;
+
+                                if (videoPath != null && File(videoPath).existsSync()) {
+                                  return CircleAvatar(
+                                    radius: 18,
+                                    backgroundColor: Colors.black87,
+                                    child: const Icon(Icons.videocam, size: 16, color: Colors.white),
+                                  );
+                                } else if (wallpaperPath != null && File(wallpaperPath).existsSync()) {
+                                  return CircleAvatar(
+                                    radius: 18,
+                                    backgroundImage: FileImage(File(wallpaperPath)),
+                                  );
+                                } else {
+                                  return CircleAvatar(
+                                    radius: 18,
+                                    backgroundColor: themeColor,
+                                    child: Icon(
+                                      (p['isDark'] as bool? ?? true) ? Icons.dark_mode : Icons.light_mode,
+                                      size: 16,
+                                      color: Colors.white,
+                                    ),
+                                  );
+                                }
+                              }(),
+                              title: Text(
+                                p['name'] as String? ?? 'Preset',
+                                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                              ),
+                              subtitle: Text(
+                                [
+                                  p['theme'] as String? ?? '',
+                                  (p['isDark'] as bool? ?? true) ? 'Dark' : 'Light',
+                                  if (hasVideo) 'Video wallpaper'
+                                  else if (hasWallpaper) 'Image wallpaper',
+                                  if (p.containsKey('elementOpacity') || p.containsKey('lgOnCards'))
+                                    'UI effects',
+                                ].join(' • '),
+                                style: TextStyle(fontSize: 11, color: cs.onSurface.withValues(alpha: 0.5)),
+                              ),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  GestureDetector(
+                                    onTap: () => _apply(p),
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                                      decoration: BoxDecoration(
+                                        color: cs.primary.withValues(alpha: 0.12),
+                                        borderRadius: BorderRadius.circular(50),
+                                      ),
+                                      child: Text(
+                                        'Apply',
+                                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: cs.primary),
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  IconButton(
+                                    icon: Icon(Icons.delete_outline, size: 18, color: cs.onSurface.withValues(alpha: 0.4)),
+                                    onPressed: () async {
+                                      await SettingsManager.deleteThemePreset(i);
+                                    },
+                                    visualDensity: VisualDensity.compact,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+sealed class _LiquidItem {
+  const _LiquidItem();
+}
+
+class _LiquidSliderConfig extends _LiquidItem {
+  const _LiquidSliderConfig({
+    required this.label,
+    required this.description,
+    required this.listenable,
+    required this.min,
+    required this.max,
+    required this.divisions,
+    required this.format,
+    required this.onChanged,
+  });
+  final String label;
+  final String description;
+  final ValueNotifier<double> listenable;
+  final double min;
+  final double max;
+  final int divisions;
+  final String Function(double) format;
+  final Future<void> Function(double) onChanged;
+}
+
+class _LiquidToggleItem extends _LiquidItem {
+  const _LiquidToggleItem({
+    required this.label,
+    required this.description,
+    required this.listenable,
+    required this.onChanged,
+  });
+  final String label;
+  final String description;
+  final ValueNotifier<bool> listenable;
+  final Future<void> Function(bool) onChanged;
+}

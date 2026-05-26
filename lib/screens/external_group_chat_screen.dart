@@ -1,4 +1,6 @@
 // lib/screens/external_group_chat_screen.dart
+import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
+import '../enums/liquid_glass_quality.dart';
 import 'package:ONYX/screens/forward_screen.dart';
 import 'package:ONYX/managers/settings_manager.dart';
 import '../l10n/app_localizations.dart';
@@ -10,7 +12,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:io';
-import 'dart:ui' as ui;
+import '../widgets/chat_background_layer.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
@@ -21,6 +23,7 @@ import '../models/external_server.dart';
 import '../managers/external_server_manager.dart';
 import '../enums/media_provider.dart';
 import '../widgets/message_bubble.dart';
+import '../widgets/chat_images_scope.dart';
 import '../widgets/drag_drop_zone.dart';
 import '../widgets/file_preview_dialog.dart';
 import '../widgets/album_preview_dialog.dart';
@@ -39,6 +42,7 @@ import '../widgets/animated_message_bubble.dart';
 import '../widgets/voice_channel_popup.dart';
 import '../voice/voice_channel_manager.dart';
 import '../widgets/message_reaction_bar.dart';
+import '../widgets/swipeable_message_wrapper.dart';
 import '../widgets/media_picker_sheet.dart';
 import '../widgets/chat_input_bar.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -117,6 +121,21 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
       })>((active: false, selected: {}));
   Map<String, Map<String, dynamic>> get _selectedExtMessages =>
       _selectionNotifier.value.selected;
+  final GlobalKey _messageListViewportKey = GlobalKey();
+  final Map<String, GlobalKey> _messageItemKeys = {};
+  List<String> _dragSelectionOrder = const [];
+  Map<String, Map<String, dynamic>> _dragSelectionLookup = const {};
+  Map<String, int> _dragSelectionIndices = const {};
+  bool _isDragSelectingMessages = false;
+  String? _dragSelectionAnchorKey;
+  String? _dragSelectionCurrentKey;
+  Map<String, Map<String, dynamic>> _dragSelectionBase = const {};
+  Offset _lastDragPointerGlobal = Offset.zero;
+  Timer? _dragAutoScrollTimer;
+  static const Duration _messageLongPressDuration =
+      Duration(milliseconds: 375);
+  static const double _dragEdgeZone = 80.0;
+  static const double _dragMaxSpeed = 14.0;
 
   bool _isExtTextMessage(Map<String, dynamic> msg) {
     final t = msg['content']?.toString() ?? '';
@@ -151,6 +170,141 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
       next[uniqueKey] = msg;
       _selectionNotifier.value = (active: true, selected: next);
     }
+  }
+
+  String _selectionKeyForExtMessage(Map<String, dynamic> msg) {
+    final rawSender = msg['sender']?.toString() ?? '?';
+    final msgId = msg['id']?.toString() ?? '';
+    final timestamp = msg['timestamp']?.toString() ?? '';
+    final content = msg['content']?.toString() ?? '';
+    return '${msgId}_${timestamp}_${rawSender}_${content.hashCode}';
+  }
+
+  GlobalKey _messageItemKey(String uniqueKey) =>
+      _messageItemKeys.putIfAbsent(uniqueKey, () => GlobalKey());
+
+  void _startExtDragSelection(Map<String, dynamic> msg, String uniqueKey) {
+    final cur = _selectionNotifier.value;
+    final next = Map<String, Map<String, dynamic>>.from(cur.selected);
+    if (!cur.active) {
+      HapticFeedback.mediumImpact();
+    }
+    next[uniqueKey] = msg;
+    _selectionNotifier.value = (active: true, selected: next);
+    _dragSelectionBase = Map<String, Map<String, dynamic>>.from(cur.selected)
+      ..[uniqueKey] = msg;
+    _dragSelectionAnchorKey = uniqueKey;
+    _dragSelectionCurrentKey = uniqueKey;
+    _isDragSelectingMessages = true;
+    _selectExtMessageRangeTo(uniqueKey);
+  }
+
+  void _updateExtDragSelection(Offset globalPosition) {
+    if (!_isDragSelectingMessages) return;
+    _lastDragPointerGlobal = globalPosition;
+    final hoveredKey = _messageKeyAtGlobal(globalPosition);
+    if (hoveredKey != null && hoveredKey != _dragSelectionCurrentKey) {
+      _selectExtMessageRangeTo(hoveredKey);
+    }
+    _updateDragAutoScroll();
+  }
+
+  void _endExtDragSelection() {
+    _isDragSelectingMessages = false;
+    _dragSelectionAnchorKey = null;
+    _dragSelectionCurrentKey = null;
+    _dragSelectionBase = const {};
+    _stopDragAutoScroll();
+  }
+
+  void _selectExtMessageRangeTo(String uniqueKey) {
+    final anchorKey = _dragSelectionAnchorKey;
+    if (anchorKey == null) return;
+    final start = _dragSelectionIndices[anchorKey];
+    final end = _dragSelectionIndices[uniqueKey];
+    if (start == null || end == null) return;
+    final from = min(start, end);
+    final to = max(start, end);
+    final next = Map<String, Map<String, dynamic>>.from(_dragSelectionBase);
+    for (int i = from; i <= to; i++) {
+      final key = _dragSelectionOrder[i];
+      final msg = _dragSelectionLookup[key];
+      if (msg != null) next[key] = msg;
+    }
+    _dragSelectionCurrentKey = uniqueKey;
+    _selectionNotifier.value = (active: true, selected: next);
+  }
+
+  String? _messageKeyAtGlobal(Offset globalPosition) {
+    for (final uniqueKey in _dragSelectionOrder) {
+      final context = _messageItemKeys[uniqueKey]?.currentContext;
+      if (context == null) continue;
+      final box = context.findRenderObject() as RenderBox?;
+      if (box == null || !box.hasSize) continue;
+      final local = box.globalToLocal(globalPosition);
+      if (local.dx >= 0 &&
+          local.dy >= 0 &&
+          local.dx <= box.size.width &&
+          local.dy <= box.size.height) {
+        return uniqueKey;
+      }
+    }
+    return null;
+  }
+
+  void _updateDragAutoScroll() {
+    final box =
+        _messageListViewportKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final local = box.globalToLocal(_lastDragPointerGlobal);
+    final height = box.size.height;
+    final nearTop = local.dy < _dragEdgeZone;
+    final nearBottom = local.dy > height - _dragEdgeZone;
+    if (nearTop || nearBottom) {
+      _dragAutoScrollTimer ??= Timer.periodic(
+        const Duration(milliseconds: 16),
+        (_) => _handleDragAutoScrollTick(),
+      );
+    } else {
+      _stopDragAutoScroll();
+    }
+  }
+
+  void _handleDragAutoScrollTick() {
+    if (!_isDragSelectingMessages || !_scroll.hasClients) {
+      _stopDragAutoScroll();
+      return;
+    }
+    final box =
+        _messageListViewportKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final local = box.globalToLocal(_lastDragPointerGlobal);
+    final height = box.size.height;
+    double speed = 0;
+    if (local.dy < _dragEdgeZone) {
+      final depth =
+          ((_dragEdgeZone - local.dy) / _dragEdgeZone).clamp(0.0, 1.0);
+      speed = depth * _dragMaxSpeed;
+    } else if (local.dy > height - _dragEdgeZone) {
+      final depth = ((local.dy - (height - _dragEdgeZone)) / _dragEdgeZone)
+          .clamp(0.0, 1.0);
+      speed = -(depth * _dragMaxSpeed);
+    } else {
+      _stopDragAutoScroll();
+      return;
+    }
+    final newOffset =
+        (_scroll.offset + speed).clamp(0.0, _scroll.position.maxScrollExtent);
+    _scroll.jumpTo(newOffset);
+    final hoveredKey = _messageKeyAtGlobal(_lastDragPointerGlobal);
+    if (hoveredKey != null && hoveredKey != _dragSelectionCurrentKey) {
+      _selectExtMessageRangeTo(hoveredKey);
+    }
+  }
+
+  void _stopDragAutoScroll() {
+    _dragAutoScrollTimer?.cancel();
+    _dragAutoScrollTimer = null;
   }
 
   void _copySelectedExtMessages() {
@@ -314,6 +468,7 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
     _wsIncomingBuffer.clear();
     _textCtrl.dispose();
     _focusNode.dispose();
+    _stopDragAutoScroll();
     _scroll.dispose();
     _showScrollDownButton.dispose();
     _inputEntryController.dispose();
@@ -1945,8 +2100,7 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
               continue;
             }
             try {
-              final ok = await GallerySaver.saveImage(cached.file.path,
-                  albumName: 'ONYX');
+              final ok = await saveImageToGallery(cached.file.path);
               if (ok == true)
                 saved++;
               else
@@ -2015,8 +2169,7 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
                 continue;
               }
               try {
-                final ok = await GallerySaver.saveImage(cached.file.path,
-                    albumName: 'ONYX');
+                final ok = await saveImageToGallery(cached.file.path);
                 if (ok == true) {
                   saved++;
                 } else {
@@ -2107,6 +2260,7 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
         final isImage = [
           '.jpg',
           '.jpeg',
+          '.jfif',
           '.png',
           '.gif',
           '.webp',
@@ -2116,8 +2270,7 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
         final isVideo =
             ['.mp4', '.mov', '.avi', '.webm', '.m4v', '.mkv'].contains(ext);
         if (isImage) {
-          final saved =
-              await GallerySaver.saveImage(file.path, albumName: 'ONYX');
+          final saved = await saveImageToGallery(file.path);
           rootScreenKey.currentState?.showSnack(
               saved == true ? 'Saved to gallery' : 'Failed to save to gallery');
         } else if (isVideo) {
@@ -2171,7 +2324,7 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
     }
   }
 
-  List<ContextMenuButtonItem> _buildExternalDesktopMenuItems(
+  List<DesktopMenuItem> _buildExternalDesktopMenuItems(
       Map<String, dynamic> msg) {
     final content = msg['content']?.toString() ?? '';
     final rawSender = msg['sender']?.toString() ?? '';
@@ -2214,17 +2367,20 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
             (content.contains('/uploads/') ||
                 content.contains('file.io') ||
                 content.contains('cdn.')));
+    final l = AppLocalizations.of(context);
     return [
-      ContextMenuButtonItem(
-        label: 'Reply',
+      DesktopMenuItem(
+        icon: Icons.reply_rounded,
+        label: l.reply,
         onPressed: () => _startReply({
           'id': msg['id']?.toString(),
           'sender': rawSender,
           'content': content,
         }),
       ),
-      ContextMenuButtonItem(
-        label: 'React',
+      DesktopMenuItem(
+        icon: Icons.add_reaction_outlined,
+        label: l.react,
         onPressed: () {
           final extMsgId = msg['id']?.toString() ?? '';
           final msgIdInt = int.tryParse(extMsgId);
@@ -2237,31 +2393,34 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
         },
       ),
       if (isSaveable)
-        ContextMenuButtonItem(
-          label: 'Save',
+        DesktopMenuItem(
+          icon: Icons.save_alt_rounded,
+          label: l.save,
           onPressed: () => _saveMediaFromMessage(content),
         ),
       if (isImage || isProxyImage)
-        ContextMenuButtonItem(
-          label: 'Copy Image',
+        DesktopMenuItem(
+          icon: Icons.copy_all_rounded,
+          label: l.copyImage,
           onPressed: isImage
               ? () => copyMessageImageToClipboard(
                   content, (m) => rootScreenKey.currentState?.showSnack(m))
               : () => _copyExternalProxyImage(content),
         ),
       if (!isMedia)
-        ContextMenuButtonItem(
-          label: 'Copy',
+        DesktopMenuItem(
+          icon: Icons.content_copy_rounded,
+          label: l.copy,
           type: ContextMenuButtonType.copy,
           onPressed: () {
             Clipboard.setData(ClipboardData(text: content));
-            rootScreenKey.currentState?.showSnack(
-                AppLocalizations(SettingsManager.appLocale.value).msgCopied);
+            rootScreenKey.currentState?.showSnack(l.msgCopied);
           },
         ),
       if (isFile)
-        ContextMenuButtonItem(
-          label: 'Show in file system',
+        DesktopMenuItem(
+          icon: Icons.folder_open_rounded,
+          label: l.showInFileSystem,
           onPressed: () {
             String filename = '';
             try {
@@ -2276,8 +2435,7 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
             final localPath =
                 filename.isNotEmpty ? mediaFilePathRegistry[filename] : null;
             if (localPath == null) {
-              rootScreenKey.currentState
-                  ?.showSnack('File not loaded yet — open it first');
+              rootScreenKey.currentState?.showSnack(l.fileNotLoadedOpenFirst);
               return;
             }
             revealInFileSystem(localPath);
@@ -2659,20 +2817,8 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
     }
     if (paths == null || paths.isEmpty) return;
 
-    if (paths.length > 1 && paths.every(FileTypeDetector.isImage)) {
-      if (SettingsManager.confirmFileUpload.value) {
-        if (!mounted) return;
-        showDialog(
-          context: context,
-          builder: (_) => AlbumPreviewDialog(
-            filePaths: paths!,
-            onSend: () => _processAndUploadAlbum(paths!),
-            onCancel: () {},
-          ),
-        );
-        return;
-      }
-      await _processAndUploadAlbum(paths);
+    if (paths.length > 1) {
+      await _handleDroppedFiles(paths);
       return;
     }
 
@@ -2708,8 +2854,7 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
 
   Future<void> _processAndUploadAlbum(List<String> filePaths) async {
     if (_isReadOnlyChannel) return;
-    final limited = filePaths.take(10).toList();
-    if (limited.isEmpty) return;
+    if (filePaths.isEmpty) return;
 
     final items = <Map<String, String>>[];
 
@@ -2717,9 +2862,9 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
       if (mounted) {
         rootScreenKey.currentState?.showSnack(
             AppLocalizations(SettingsManager.appLocale.value)
-                .uploadingImages(limited.length));
+                .uploadingImages(filePaths.length));
       }
-      for (final filePath in limited) {
+      for (final filePath in filePaths) {
         final basename = p.basename(filePath);
         final bytes = await File(filePath).readAsBytes();
         final link = await _uploadToServer(bytes, basename);
@@ -2734,9 +2879,9 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
       if (mounted) {
         rootScreenKey.currentState?.showSnack(
             AppLocalizations(SettingsManager.appLocale.value)
-                .uploadingImages(limited.length));
+                .uploadingImages(filePaths.length));
       }
-      for (final filePath in limited) {
+      for (final filePath in filePaths) {
         final basename = p.basename(filePath);
         final bytes = await File(filePath).readAsBytes();
         final link = await _uploadToProvider(bytes, basename, provider);
@@ -2865,42 +3010,67 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
     }
     if (existing.isEmpty) return;
 
-    if (existing.length > 1 && existing.every(FileTypeDetector.isImage)) {
-      if (SettingsManager.confirmFileUpload.value) {
-        if (!mounted) return;
-        showDialog(
-          context: context,
-          builder: (_) => AlbumPreviewDialog(
-            filePaths: existing,
-            onSend: () => _processAndUploadAlbum(existing),
-            onCancel: () {},
-          ),
-        );
-        return;
-      }
-      await _processAndUploadAlbum(existing);
+    // Single file — always confirm
+    if (existing.length == 1) {
+      final filePath = existing.first;
+      final isImage = FileTypeDetector.isImage(filePath);
+      if (!mounted) return;
+      showDialog(
+        context: context,
+        builder: (_) => FilePreviewDialog(
+          filePath: filePath,
+          onSend: () => _processAndUploadFile(filePath),
+          onCancel: () {
+            rootScreenKey.currentState?.showSnack(
+                AppLocalizations(SettingsManager.appLocale.value)
+                    .fileCancelled);
+          },
+          onPasteExtra: isImage ? _pasteImageForAlbum : null,
+          onSendAlbum: isImage ? (ps) => _processAndUploadAlbum(ps) : null,
+        ),
+      );
       return;
     }
 
-    for (final filePath in existing) {
-      if (SettingsManager.confirmFileUpload.value) {
-        final isImage = FileTypeDetector.isImage(filePath);
-        showDialog(
+    // Multiple files — always confirm each batch/file.
+    int i = 0;
+    while (i < existing.length) {
+      final fp = existing[i];
+      if (FileTypeDetector.isImage(fp)) {
+        final batch = <String>[];
+        while (i < existing.length &&
+            FileTypeDetector.isImage(existing[i]) &&
+            batch.length < 10) {
+          batch.add(existing[i]);
+          i++;
+        }
+        if (!mounted) return;
+        var proceed = false;
+        await showDialog<void>(
           context: context,
-          builder: (_) => FilePreviewDialog(
-            filePath: filePath,
-            onSend: () => _processAndUploadFile(filePath),
-            onCancel: () {
-              rootScreenKey.currentState?.showSnack(
-                  AppLocalizations(SettingsManager.appLocale.value)
-                      .fileCancelled);
-            },
-            onPasteExtra: isImage ? _pasteImageForAlbum : null,
-            onSendAlbum: isImage ? (ps) => _processAndUploadAlbum(ps) : null,
+          builder: (_) => AlbumPreviewDialog(
+            filePaths: batch,
+            onSend: () => proceed = true,
+            onCancel: () {},
           ),
         );
+        if (!proceed) continue;
+        await _processAndUploadAlbum(batch);
       } else {
-        _processAndUploadFile(filePath);
+        if (!mounted) return;
+        var proceed = false;
+        await showDialog<void>(
+          context: context,
+          builder: (_) => FilePreviewDialog(
+            filePath: fp,
+            onSend: () => proceed = true,
+            onCancel: () {},
+            onPasteExtra: null,
+            onSendAlbum: null,
+          ),
+        );
+        if (proceed) await _processAndUploadFile(fp);
+        i++;
       }
     }
   }
@@ -3175,14 +3345,28 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
                     )
                   : const SizedBox.shrink(),
             ),
-            ValueListenableBuilder<double>(
-              valueListenable: SettingsManager.elementBrightness,
-              builder: (_, brightness, ___) {
+            ListenableBuilder(
+              listenable: Listenable.merge([
+                SettingsManager.elementBrightness,
+                SettingsManager.liquidGlassOnInput,
+                SettingsManager.liquidGlassInputQuality,
+                SettingsManager.liquidGlassInputBlur,
+                SettingsManager.liquidGlassInputTint,
+                SettingsManager.liquidGlassInputSaturation,
+                SettingsManager.liquidGlassInputChromatic,
+                SettingsManager.liquidGlassInputRefractive,
+                SettingsManager.liquidGlassInputLightIntensity,
+                SettingsManager.liquidGlassInputThickness,
+              ]),
+              builder: (_, __) {
+                final brightness = SettingsManager.elementBrightness.value;
                 final baseColor = SettingsManager.getElementColor(
                   colorScheme.surfaceContainerHighest,
                   brightness,
                 );
-                return ChatInputBar(
+                final isMobile = !Platform.isWindows && !Platform.isMacOS && !Platform.isLinux;
+                final useGlass = isMobile && SettingsManager.liquidGlassOnInput.value;
+                final bar = ChatInputBar(
                   controller: _textCtrl,
                   textFocusNode: _focusNode,
                   recordingListenable: recordingNotifier,
@@ -3201,10 +3385,12 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
                   onPaste: _handlePasteFromClipboard,
                   hintText:
                       AppLocalizations.of(context).localizeHint(_inputHint),
-                  backgroundColor: baseColor,
-                  opacity: opacity,
-                  borderColor:
-                      colorScheme.outlineVariant.withValues(alpha: 0.15),
+                  backgroundColor: useGlass ? Colors.white : baseColor,
+                  opacity: useGlass ? 0.0 : opacity,
+                  borderColor: useGlass
+                      ? Colors.transparent
+                      : colorScheme.outlineVariant.withValues(alpha: 0.15),
+                  glassMode: useGlass,
                   contentInsertionConfiguration:
                       ContentInsertionConfiguration(
                     allowedMimeTypes: const [
@@ -3240,6 +3426,44 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
                       }
                     },
                   ),
+                );
+                if (!useGlass) return bar;
+                final quality = SettingsManager.liquidGlassInputQuality.value;
+                final blur = SettingsManager.liquidGlassInputBlur.value;
+                final tint = SettingsManager.liquidGlassInputTint.value;
+                final saturation = SettingsManager.liquidGlassInputSaturation.value;
+                final chromatic = SettingsManager.liquidGlassInputChromatic.value;
+                final refractive = SettingsManager.liquidGlassInputRefractive.value;
+                final lightIntensity = SettingsManager.liquidGlassInputLightIntensity.value;
+                final thickness = SettingsManager.liquidGlassInputThickness.value;
+                final glassQuality = switch (quality) {
+                  LiquidGlassQuality.fast    => GlassQuality.standard,
+                  LiquidGlassQuality.medium  => GlassQuality.minimal,
+                  LiquidGlassQuality.quality => GlassQuality.premium,
+                };
+                final isDark = Theme.of(context).brightness == Brightness.dark;
+                final tintColor = isDark
+                    ? Colors.white.withValues(alpha: tint)
+                    : Colors.black.withValues(alpha: tint);
+                final settings = LiquidGlassSettings(
+                  thickness: thickness,
+                  blur: blur,
+                  chromaticAberration: chromatic,
+                  lightIntensity: lightIntensity,
+                  refractiveIndex: refractive,
+                  saturation: saturation,
+                  ambientStrength: 0.8,
+                  lightAngle: 0.75 * pi,
+                  glassColor: tintColor,
+                );
+                return GlassCard(
+                  useOwnLayer: true,
+                  settings: settings,
+                  quality: glassQuality,
+                  padding: EdgeInsets.zero,
+                  shape: LiquidRoundedRectangle(borderRadius: 24),
+                  clipBehavior: Clip.antiAlias,
+                  child: bar,
                 );
               },
             ),
@@ -4081,48 +4305,7 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
                 enabled: !_isReadOnlyChannel && _isConnected,
                 child: Stack(
                   children: [
-                    ValueListenableBuilder<String?>(
-                      valueListenable: SettingsManager.chatBackground,
-                      builder: (_, path, __) {
-                        if (path == null) return const SizedBox.shrink();
-                        final f = File(path);
-                        return ValueListenableBuilder<bool>(
-                          valueListenable: SettingsManager.blurBackground,
-                          builder: (_, blur, __) {
-                            return ValueListenableBuilder<double>(
-                              valueListenable: SettingsManager.blurSigma,
-                              builder: (_, sigma, __) {
-                                final image = Image.file(
-                                  f,
-                                  fit: BoxFit.cover,
-                                  errorBuilder: (_, __, ___) =>
-                                      const SizedBox.shrink(),
-                                );
-                                return ValueListenableBuilder<bool>(
-                                  valueListenable: SettingsManager
-                                      .enablePerformanceOptimizations,
-                                  builder: (_, perfOptim, __) {
-                                    final child = (blur && !perfOptim)
-                                        ? ImageFiltered(
-                                            imageFilter: ui.ImageFilter.blur(
-                                                sigmaX: sigma, sigmaY: sigma),
-                                            child: image,
-                                          )
-                                        : image;
-                                    return Positioned.fill(
-                                      child: IgnorePointer(
-                                        child: Opacity(
-                                            opacity: 0.95, child: child),
-                                      ),
-                                    );
-                                  },
-                                );
-                              },
-                            );
-                          },
-                        );
-                      },
-                    ),
+                    const ChatBackgroundLayer(),
                     Builder(
                       builder: (context) {
                         final swapped =
@@ -4169,7 +4352,24 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
                           }
                         }
 
-                        return Listener(
+                        final dragMessages = displayItems
+                            .whereType<Map<String, dynamic>>()
+                            .toList(growable: false);
+                        _dragSelectionOrder = dragMessages
+                            .map(_selectionKeyForExtMessage)
+                            .toList(growable: false);
+                        _dragSelectionLookup = {
+                          for (final msg in dragMessages)
+                            _selectionKeyForExtMessage(msg): msg,
+                        };
+                        _dragSelectionIndices = {
+                          for (int idx = 0; idx < _dragSelectionOrder.length; idx++)
+                            _dragSelectionOrder[idx]: idx,
+                        };
+                        return ChatImagesScope(
+                          allImages: ChatImagesScope.computeFromGroupMessages(_messages),
+                          child: Listener(
+                          key: _messageListViewportKey,
                           onPointerDown: (_) {
                             if (!isDesktop) return;
                             _suppressAutoRefocus = true;
@@ -4223,23 +4423,14 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
                                     maxWidth:
                                         MediaQuery.of(context).size.width *
                                             0.7),
-                                child: GestureDetector(
-                                  onHorizontalDragEnd: isDesktop
-                                      ? null
-                                      : (details) {
-                                          final v = details.primaryVelocity;
-                                          if (v != null && v > 300) {
-                                            HapticFeedback.selectionClick();
-                                            _showExternalMessageMenu(msg);
-                                          } else if (v != null && v < -300) {
-                                            _startReply({
-                                              'id': msg['id']?.toString(),
-                                              'sender': rawSender,
-                                              'content': content,
-                                            });
-                                            HapticFeedback.selectionClick();
-                                          }
-                                        },
+                                child: SwipeableMessageWrapper(
+                                  onSwipeRight: () =>
+                                      _showExternalMessageMenu(msg),
+                                  onSwipeLeft: () => _startReply({
+                                    'id': msg['id']?.toString(),
+                                    'sender': rawSender,
+                                    'content': content,
+                                  }),
                                   child: MessageBubble(
                                     key: ValueKey<String>(
                                         'mb_${msg['timestamp']}_${rawSender}_${content.hashCode}'),
@@ -4414,21 +4605,27 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
                                     ),
                                   );
 
-                                  return RawGestureDetector(
+                                  return KeyedSubtree(
+                                    key: _messageItemKey(uniqueKey),
+                                    child: RawGestureDetector(
                                     behavior: HitTestBehavior.translucent,
                                     gestures: {
                                       LongPressGestureRecognizer:
                                           GestureRecognizerFactoryWithHandlers<
                                               LongPressGestureRecognizer>(
                                         () => LongPressGestureRecognizer(
-                                            duration: const Duration(
-                                                milliseconds: 250)),
+                                            duration:
+                                                _messageLongPressDuration),
                                         (instance) {
-                                          instance.onLongPress = sel.active
-                                              ? () => _toggleExtMsgSelection(
-                                                  msg, uniqueKey)
-                                              : () => _enterExtSelectionMode(
+                                          instance.onLongPressStart = (_) =>
+                                              _startExtDragSelection(
                                                   msg, uniqueKey);
+                                          instance.onLongPressMoveUpdate =
+                                              (details) =>
+                                                  _updateExtDragSelection(
+                                                      details.globalPosition);
+                                          instance.onLongPressEnd = (_) =>
+                                              _endExtDragSelection();
                                         },
                                       ),
                                     },
@@ -4481,11 +4678,13 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
                                         ),
                                       ),
                                     ),
+                                  ),
                                   );
                                 },
                               );
                             },
                           ),
+                        ),
                         );
                       },
                     ),
@@ -4533,56 +4732,91 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
                         },
                         child: Center(
                           child: _isReadOnlyChannel
-                              ? ValueListenableBuilder<double>(
-                                  valueListenable:
-                                      SettingsManager.elementOpacity,
-                                  builder: (_, opacity, __) {
-                                    return ValueListenableBuilder<double>(
-                                      valueListenable:
-                                          SettingsManager.inputBarMaxWidth,
-                                      builder: (_, width, __) {
-                                        return ValueListenableBuilder<double>(
-                                          valueListenable:
-                                              SettingsManager.elementBrightness,
-                                          builder: (_, brightness, ___) {
-                                            final baseColor =
-                                                SettingsManager.getElementColor(
-                                              colorScheme
-                                                  .surfaceContainerHighest,
-                                              brightness,
-                                            );
-                                            return Container(
-                                              constraints: BoxConstraints(
-                                                  maxWidth: width),
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                      vertical: 12,
-                                                      horizontal: 16),
-                                              decoration: BoxDecoration(
-                                                color: baseColor.withValues(
-                                                    alpha: opacity),
-                                                borderRadius:
-                                                    BorderRadius.circular(28),
-                                                border: Border.all(
-                                                  color: colorScheme
-                                                      .outlineVariant
-                                                      .withValues(alpha: 0.15),
-                                                  width: 1,
-                                                ),
-                                              ),
-                                              child: Text(
-                                                'This is a channel. Only owner and moderators can post.',
-                                                style: TextStyle(
-                                                  color: colorScheme.onSurface
-                                                      .withValues(alpha: 0.6),
-                                                  fontSize: 14,
-                                                ),
-                                                textAlign: TextAlign.center,
-                                              ),
-                                            );
-                                          },
-                                        );
-                                      },
+                              ? ListenableBuilder(
+                                  listenable: Listenable.merge([
+                                    SettingsManager.elementOpacity,
+                                    SettingsManager.inputBarMaxWidth,
+                                    SettingsManager.elementBrightness,
+                                    SettingsManager.liquidGlassOnInput,
+                                    SettingsManager.liquidGlassInputQuality,
+                                    SettingsManager.liquidGlassInputBlur,
+                                    SettingsManager.liquidGlassInputTint,
+                                    SettingsManager.liquidGlassInputSaturation,
+                                    SettingsManager.liquidGlassInputChromatic,
+                                    SettingsManager.liquidGlassInputRefractive,
+                                    SettingsManager.liquidGlassInputLightIntensity,
+                                    SettingsManager.liquidGlassInputThickness,
+                                  ]),
+                                  builder: (_, __) {
+                                    final opacity = SettingsManager.elementOpacity.value;
+                                    final width = SettingsManager.inputBarMaxWidth.value;
+                                    final brightness = SettingsManager.elementBrightness.value;
+                                    final isMobile = !Platform.isWindows && !Platform.isMacOS && !Platform.isLinux;
+                                    final useGlass = isMobile && SettingsManager.liquidGlassOnInput.value;
+                                    final baseColor = SettingsManager.getElementColor(
+                                      colorScheme.surfaceContainerHighest,
+                                      brightness,
+                                    );
+                                    final label = Container(
+                                      constraints: BoxConstraints(maxWidth: width),
+                                      padding: const EdgeInsets.symmetric(
+                                          vertical: 12, horizontal: 16),
+                                      decoration: useGlass ? null : BoxDecoration(
+                                        color: baseColor.withValues(alpha: opacity),
+                                        borderRadius: BorderRadius.circular(28),
+                                        border: Border.all(
+                                          color: colorScheme.outlineVariant
+                                              .withValues(alpha: 0.15),
+                                          width: 1,
+                                        ),
+                                      ),
+                                      child: Text(
+                                        'This is a channel. Only owner and moderators can post.',
+                                        style: TextStyle(
+                                          color: colorScheme.onSurface
+                                              .withValues(alpha: 0.6),
+                                          fontSize: 14,
+                                        ),
+                                        textAlign: TextAlign.center,
+                                      ),
+                                    );
+                                    if (!useGlass) return label;
+                                    final quality = SettingsManager.liquidGlassInputQuality.value;
+                                    final blur = SettingsManager.liquidGlassInputBlur.value;
+                                    final tint = SettingsManager.liquidGlassInputTint.value;
+                                    final saturation = SettingsManager.liquidGlassInputSaturation.value;
+                                    final chromatic = SettingsManager.liquidGlassInputChromatic.value;
+                                    final refractive = SettingsManager.liquidGlassInputRefractive.value;
+                                    final lightIntensity = SettingsManager.liquidGlassInputLightIntensity.value;
+                                    final thickness = SettingsManager.liquidGlassInputThickness.value;
+                                    final glassQuality = switch (quality) {
+                                      LiquidGlassQuality.fast    => GlassQuality.standard,
+                                      LiquidGlassQuality.medium  => GlassQuality.minimal,
+                                      LiquidGlassQuality.quality => GlassQuality.premium,
+                                    };
+                                    final isDark = Theme.of(context).brightness == Brightness.dark;
+                                    final tintColor = isDark
+                                        ? Colors.white.withValues(alpha: tint)
+                                        : Colors.black.withValues(alpha: tint);
+                                    final settings = LiquidGlassSettings(
+                                      thickness: thickness,
+                                      blur: blur,
+                                      chromaticAberration: chromatic,
+                                      lightIntensity: lightIntensity,
+                                      refractiveIndex: refractive,
+                                      saturation: saturation,
+                                      ambientStrength: 0.8,
+                                      lightAngle: 0.75 * pi,
+                                      glassColor: tintColor,
+                                    );
+                                    return GlassCard(
+                                      useOwnLayer: true,
+                                      settings: settings,
+                                      quality: glassQuality,
+                                      padding: EdgeInsets.zero,
+                                      shape: LiquidRoundedRectangle(borderRadius: 28),
+                                      clipBehavior: Clip.antiAlias,
+                                      child: label,
                                     );
                                   },
                                 )

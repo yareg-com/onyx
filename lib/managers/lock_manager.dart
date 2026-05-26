@@ -1,0 +1,116 @@
+import 'dart:convert';
+import 'package:crypto/crypto.dart' as crypto;
+import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:local_auth/local_auth.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+class LockManager {
+  static const _chatsKey = 'locked_chats';
+  static const _pinKeyPrefix = 'lock_pin_';
+  static const _secureStorage = FlutterSecureStorage();
+  static final _localAuth = LocalAuthentication();
+
+  static final ValueNotifier<Set<String>> lockedChats =
+      ValueNotifier<Set<String>>({});
+
+  static final _sessionUnlocked = <String>{};
+  static final Map<String, String> _cachedPinHashes = {};
+
+  static Future<void> init() async {
+    final prefs = await SharedPreferences.getInstance();
+    final list = prefs.getStringList(_chatsKey) ?? [];
+    lockedChats.value = Set<String>.from(list);
+
+    final all = await _secureStorage.readAll();
+    for (final entry in all.entries) {
+      if (entry.key.startsWith(_pinKeyPrefix) && entry.value.isNotEmpty) {
+        final chatId = entry.key.substring(_pinKeyPrefix.length);
+        _cachedPinHashes[chatId] = entry.value;
+      }
+    }
+  }
+
+  static Future<void> _save() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_chatsKey, lockedChats.value.toList());
+  }
+
+  // ── Lock state ─────────────────────────────────────────────────────────────
+
+  static bool isLocked(String chatId) => lockedChats.value.contains(chatId);
+
+  static Future<void> lock(String chatId) async {
+    final updated = Set<String>.from(lockedChats.value)..add(chatId);
+    lockedChats.value = updated;
+    await _save();
+  }
+
+  static Future<void> removeLock(String chatId) async {
+    final updated = Set<String>.from(lockedChats.value)..remove(chatId);
+    lockedChats.value = updated;
+    _sessionUnlocked.remove(chatId);
+    _cachedPinHashes.remove(chatId);
+    await _secureStorage.delete(key: '$_pinKeyPrefix$chatId');
+    await _save();
+  }
+
+  // ── Session unlock (stays open until app restart) ──────────────────────────
+
+  static bool isSessionUnlocked(String chatId) =>
+      _sessionUnlocked.contains(chatId);
+
+  static void sessionUnlock(String chatId) => _sessionUnlocked.add(chatId);
+
+  static void clearSession() => _sessionUnlocked.clear();
+
+  // ── PIN ────────────────────────────────────────────────────────────────────
+
+  static bool hasPin(String chatId) =>
+      _cachedPinHashes.containsKey(chatId) &&
+      _cachedPinHashes[chatId]!.isNotEmpty;
+
+  static String _hash(String pin) {
+    final bytes = utf8.encode('onyx_lock_$pin');
+    return crypto.sha256.convert(bytes).toString();
+  }
+
+  static Future<void> setPin(String chatId, String pin) async {
+    final h = _hash(pin);
+    _cachedPinHashes[chatId] = h;
+    await _secureStorage.write(key: '$_pinKeyPrefix$chatId', value: h);
+  }
+
+  static bool verifyPin(String chatId, String pin) {
+    final hash = _cachedPinHashes[chatId];
+    if (hash == null) return false;
+    return _hash(pin) == hash;
+  }
+
+  // ── Biometrics ─────────────────────────────────────────────────────────────
+
+  static Future<bool> biometricsAvailable() async {
+    try {
+      if (kIsWeb) return false;
+      final canCheck = await _localAuth.canCheckBiometrics;
+      final isSupported = await _localAuth.isDeviceSupported();
+      return canCheck || isSupported;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<bool> authenticateWithBiometrics() async {
+    try {
+      return await _localAuth.authenticate(
+        localizedReason: 'Unlock chat',
+        options: const AuthenticationOptions(
+          biometricOnly: false,
+          stickyAuth: true,
+        ),
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+}

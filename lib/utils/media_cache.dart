@@ -18,6 +18,13 @@ class MediaCache {
   static const _nonceLen = 12;
   static const _macLen = 16;
 
+  /// Clears the cached key so the next [init] call re-reads it from SecureStore.
+  /// Must be called on lock (key wiped from memory) and after unlock (key now readable).
+  void reset() {
+    _initialized = false;
+    _key = null;
+  }
+
   Future<void> init() async {
     if (_initialized) return;
     _initialized = true;

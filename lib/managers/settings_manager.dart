@@ -1,15 +1,21 @@
 // lib/managers/settings_manager.dart
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/font_family.dart';
+import '../enums/nav_bar_style.dart';
+import '../enums/liquid_glass_quality.dart';
 import 'secure_store.dart';
+import 'fallback_storage.dart';
 
 class SettingsManager {
 
   static const _chatBgKey = 'chat_background_path';
+  static const _chatVideoBgKey = 'chat_video_background_path';
+  static const _presetsKey = 'theme_presets_v1';
   static const _applyGlobKey = 'chat_background_apply_global';
   static const _blurKey = 'chat_background_blur';
   static const _blurSigmaKey = 'chat_background_blur_sigma';
@@ -26,7 +32,47 @@ class SettingsManager {
   static const _messageAnimationsKey = 'message_animations_enabled';
   static const _enablePerformanceOptimizationsKey =
       'enable_performance_optimizations';
-  static const _useLiquidGlassKey = 'use_liquid_glass_nav';
+  static const _navBarStyleKey = 'nav_bar_style';
+  static const _liquidGlassQualityKey    = 'liquid_glass_quality';
+  static const _liquidGlassExpansionKey  = 'liquid_glass_expansion';
+  static const _liquidGlassBlurKey       = 'liquid_glass_blur';
+  static const _liquidGlassTintKey       = 'liquid_glass_tint';
+  static const _liquidGlassSaturationKey = 'liquid_glass_saturation';
+  static const _liquidGlassOnCardsKey        = 'liquid_glass_on_cards';
+  static const _liquidGlassCardsBlurKey      = 'liquid_glass_cards_blur';
+  static const _liquidGlassCardsTintKey      = 'liquid_glass_cards_tint';
+  static const _liquidGlassCardsSaturationKey= 'liquid_glass_cards_saturation';
+  static const _liquidGlassJellyEnabledKey     = 'liquid_glass_jelly_enabled';
+  static const _liquidGlassOnInputKey          = 'liquid_glass_on_input';
+  static const _liquidGlassInputBlurKey        = 'liquid_glass_input_blur';
+  static const _liquidGlassInputTintKey        = 'liquid_glass_input_tint';
+  static const _liquidGlassInputSaturationKey  = 'liquid_glass_input_saturation';
+  static const _liquidGlassOnSearchKey         = 'liquid_glass_on_search';
+  static const _liquidGlassSearchBlurKey       = 'liquid_glass_search_blur';
+  static const _liquidGlassSearchTintKey       = 'liquid_glass_search_tint';
+  static const _liquidGlassSearchSaturationKey = 'liquid_glass_search_saturation';
+  // Advanced per-element settings
+  static const _liquidGlassChromaticKey        = 'liquid_glass_chromatic';
+  static const _liquidGlassRefractiveKey       = 'liquid_glass_refractive';
+  static const _liquidGlassLightIntensityKey   = 'liquid_glass_light_intensity';
+  static const _liquidGlassThicknessKey        = 'liquid_glass_thickness';
+  static const _liquidGlassCardsChromaticKey        = 'liquid_glass_cards_chromatic';
+  static const _liquidGlassCardsRefractiveKey       = 'liquid_glass_cards_refractive';
+  static const _liquidGlassCardsLightIntensityKey   = 'liquid_glass_cards_light_intensity';
+  static const _liquidGlassCardsThicknessKey        = 'liquid_glass_cards_thickness';
+  static const _liquidGlassInputChromaticKey        = 'liquid_glass_input_chromatic';
+  static const _liquidGlassInputRefractiveKey       = 'liquid_glass_input_refractive';
+  static const _liquidGlassInputLightIntensityKey   = 'liquid_glass_input_light_intensity';
+  static const _liquidGlassInputThicknessKey        = 'liquid_glass_input_thickness';
+  static const _liquidGlassSearchChromaticKey       = 'liquid_glass_search_chromatic';
+  static const _liquidGlassSearchRefractiveKey      = 'liquid_glass_search_refractive';
+  static const _liquidGlassSearchLightIntensityKey  = 'liquid_glass_search_light_intensity';
+  static const _liquidGlassSearchThicknessKey       = 'liquid_glass_search_thickness';
+  static const _liquidGlassOnNavBarKey      = 'liquid_glass_on_navbar';
+  static const _liquidGlassNavBarQualityKey = 'liquid_glass_navbar_quality';
+  static const _liquidGlassCardsQualityKey  = 'liquid_glass_cards_quality';
+  static const _liquidGlassInputQualityKey  = 'liquid_glass_input_quality';
+  static const _liquidGlassSearchQualityKey = 'liquid_glass_search_quality';
   static const _messagePaginationKey = 'message_pagination_enabled';
   static const _minimizeBottomNavKey = 'minimize_bottom_nav';
   static const _swipeTabsKey = 'swipe_tabs_enabled';
@@ -71,6 +117,10 @@ class SettingsManager {
 
   static final ValueNotifier<String?> chatBackground =
       ValueNotifier<String?>(null);
+  static final ValueNotifier<String?> chatVideoBackground =
+      ValueNotifier<String?>(null);
+  static final ValueNotifier<List<Map<String, dynamic>>> themePresets =
+      ValueNotifier<List<Map<String, dynamic>>>([]);
   static final ValueNotifier<bool> applyGlobally = ValueNotifier<bool>(false);
   static final ValueNotifier<bool> blurBackground = ValueNotifier<bool>(false);
   static final ValueNotifier<double> blurSigma = ValueNotifier<double>(8.0);
@@ -114,7 +164,51 @@ class SettingsManager {
   static final ValueNotifier<bool> enablePerformanceOptimizations =
       ValueNotifier<bool>(true);
 
-  static final ValueNotifier<bool> useLiquidGlass = ValueNotifier<bool>(true);
+  static final ValueNotifier<NavBarStyle> navBarStyle = ValueNotifier<NavBarStyle>(NavBarStyle.standard);
+  static final ValueNotifier<LiquidGlassQuality> liquidGlassQuality  = ValueNotifier<LiquidGlassQuality>(LiquidGlassQuality.quality);
+  static final ValueNotifier<double> liquidGlassExpansion  = ValueNotifier<double>(14.0);
+  static final ValueNotifier<double> liquidGlassBlur        = ValueNotifier<double>(7.0);
+  static final ValueNotifier<double> liquidGlassTint        = ValueNotifier<double>(0.10);
+  static final ValueNotifier<double> liquidGlassSaturation  = ValueNotifier<double>(1.0);
+  static final ValueNotifier<bool>   liquidGlassOnCards        = ValueNotifier<bool>(true);
+  static final ValueNotifier<double> liquidGlassCardsBlur       = ValueNotifier<double>(7.0);
+  static final ValueNotifier<double> liquidGlassCardsTint        = ValueNotifier<double>(0.10);
+  static final ValueNotifier<double> liquidGlassCardsSaturation  = ValueNotifier<double>(1.0);
+  static final ValueNotifier<bool>   liquidGlassJellyEnabled      = ValueNotifier<bool>(true);
+  static final ValueNotifier<bool>   liquidGlassOnInput           = ValueNotifier<bool>(true);
+  static final ValueNotifier<double> liquidGlassInputBlur         = ValueNotifier<double>(7.0);
+  static final ValueNotifier<double> liquidGlassInputTint         = ValueNotifier<double>(0.10);
+  static final ValueNotifier<double> liquidGlassInputSaturation   = ValueNotifier<double>(1.0);
+  static final ValueNotifier<bool>   liquidGlassOnSearch          = ValueNotifier<bool>(false);
+  static final ValueNotifier<double> liquidGlassSearchBlur        = ValueNotifier<double>(7.0);
+  static final ValueNotifier<double> liquidGlassSearchTint        = ValueNotifier<double>(0.10);
+  static final ValueNotifier<double> liquidGlassSearchSaturation  = ValueNotifier<double>(1.0);
+  // Advanced per-element: Nav Bar
+  static final ValueNotifier<double> liquidGlassChromatic       = ValueNotifier<double>(0.30);
+  static final ValueNotifier<double> liquidGlassRefractive      = ValueNotifier<double>(1.59);
+  static final ValueNotifier<double> liquidGlassLightIntensity  = ValueNotifier<double>(0.60);
+  static final ValueNotifier<double> liquidGlassThickness       = ValueNotifier<double>(30.0);
+  // Advanced per-element: Cards
+  static final ValueNotifier<double> liquidGlassCardsChromatic       = ValueNotifier<double>(0.15);
+  static final ValueNotifier<double> liquidGlassCardsRefractive      = ValueNotifier<double>(1.40);
+  static final ValueNotifier<double> liquidGlassCardsLightIntensity  = ValueNotifier<double>(0.50);
+  static final ValueNotifier<double> liquidGlassCardsThickness       = ValueNotifier<double>(20.0);
+  // Advanced per-element: Input
+  static final ValueNotifier<double> liquidGlassInputChromatic       = ValueNotifier<double>(0.15);
+  static final ValueNotifier<double> liquidGlassInputRefractive      = ValueNotifier<double>(1.40);
+  static final ValueNotifier<double> liquidGlassInputLightIntensity  = ValueNotifier<double>(0.50);
+  static final ValueNotifier<double> liquidGlassInputThickness       = ValueNotifier<double>(20.0);
+  // Advanced per-element: Search
+  static final ValueNotifier<double> liquidGlassSearchChromatic       = ValueNotifier<double>(0.15);
+  static final ValueNotifier<double> liquidGlassSearchRefractive      = ValueNotifier<double>(1.40);
+  static final ValueNotifier<double> liquidGlassSearchLightIntensity  = ValueNotifier<double>(0.50);
+  static final ValueNotifier<double> liquidGlassSearchThickness       = ValueNotifier<double>(24.0);
+  // Per-element on/off and quality
+  static final ValueNotifier<bool>               liquidGlassOnNavBar       = ValueNotifier<bool>(true);
+  static final ValueNotifier<LiquidGlassQuality> liquidGlassNavBarQuality  = ValueNotifier<LiquidGlassQuality>(LiquidGlassQuality.quality);
+  static final ValueNotifier<LiquidGlassQuality> liquidGlassCardsQuality   = ValueNotifier<LiquidGlassQuality>(LiquidGlassQuality.quality);
+  static final ValueNotifier<LiquidGlassQuality> liquidGlassInputQuality   = ValueNotifier<LiquidGlassQuality>(LiquidGlassQuality.quality);
+  static final ValueNotifier<LiquidGlassQuality> liquidGlassSearchQuality  = ValueNotifier<LiquidGlassQuality>(LiquidGlassQuality.quality);
   static final ValueNotifier<bool> messagePaginationEnabled = ValueNotifier<bool>(true);
 
   static final ValueNotifier<bool> minimizeBottomNav =
@@ -205,7 +299,64 @@ class SettingsManager {
     final messageAnimations = prefs.getBool(_messageAnimationsKey) ?? true;
     final perfOptimizations =
         prefs.getBool(_enablePerformanceOptimizationsKey) ?? true;
-    final useLiquidGlass = prefs.getBool(_useLiquidGlassKey) ?? true;
+    final navBarStyleStr = prefs.getString(_navBarStyleKey);
+    final NavBarStyle navBarStyleVal;
+    if (navBarStyleStr != null) {
+      navBarStyleVal = switch (navBarStyleStr) {
+        'liquid' || 'premium' => NavBarStyle.liquid,
+        _ => NavBarStyle.standard,
+      };
+    } else {
+      navBarStyleVal = NavBarStyle.standard;
+    }
+    final liquidQualityStr = prefs.getString(_liquidGlassQualityKey) ?? 'quality';
+    final liquidQualityVal = LiquidGlassQuality.values.firstWhere(
+      (e) => e.name == liquidQualityStr,
+      orElse: () => LiquidGlassQuality.quality,
+    );
+    final liquidExpansion   = prefs.getDouble(_liquidGlassExpansionKey)  ?? 14.0;
+    final liquidBlur        = prefs.getDouble(_liquidGlassBlurKey)        ?? 7.0;
+    final liquidTint        = prefs.getDouble(_liquidGlassTintKey)        ?? 0.10;
+    final liquidSaturation  = prefs.getDouble(_liquidGlassSaturationKey)  ?? 1.0;
+    final liquidOnCards          = prefs.getBool(_liquidGlassOnCardsKey)           ?? false;
+    final liquidCardsBlur        = prefs.getDouble(_liquidGlassCardsBlurKey)        ?? 7.0;
+    final liquidCardsTint        = prefs.getDouble(_liquidGlassCardsTintKey)        ?? 0.10;
+    final liquidCardsSaturation  = prefs.getDouble(_liquidGlassCardsSaturationKey)  ?? 1.0;
+    final liquidJellyEnabled     = prefs.getBool(_liquidGlassJellyEnabledKey)        ?? false;
+    final liquidOnInput          = prefs.getBool(_liquidGlassOnInputKey)             ?? false;
+    final liquidInputBlur        = prefs.getDouble(_liquidGlassInputBlurKey)         ?? 7.0;
+    final liquidInputTint        = prefs.getDouble(_liquidGlassInputTintKey)         ?? 0.10;
+    final liquidInputSaturation  = prefs.getDouble(_liquidGlassInputSaturationKey)   ?? 1.0;
+    final liquidOnSearch         = prefs.getBool(_liquidGlassOnSearchKey)            ?? false;
+    final liquidSearchBlur       = prefs.getDouble(_liquidGlassSearchBlurKey)        ?? 7.0;
+    final liquidSearchTint       = prefs.getDouble(_liquidGlassSearchTintKey)        ?? 0.10;
+    final liquidSearchSaturation = prefs.getDouble(_liquidGlassSearchSaturationKey)  ?? 1.0;
+    // Advanced
+    final liquidChromatic       = prefs.getDouble(_liquidGlassChromaticKey)       ?? 0.30;
+    final liquidRefractive      = prefs.getDouble(_liquidGlassRefractiveKey)      ?? 1.59;
+    final liquidLightIntensity  = prefs.getDouble(_liquidGlassLightIntensityKey)  ?? 0.60;
+    final liquidThickness       = prefs.getDouble(_liquidGlassThicknessKey)       ?? 30.0;
+    final liquidCardsChromatic       = prefs.getDouble(_liquidGlassCardsChromaticKey)       ?? 0.15;
+    final liquidCardsRefractive      = prefs.getDouble(_liquidGlassCardsRefractiveKey)      ?? 1.40;
+    final liquidCardsLightIntensity  = prefs.getDouble(_liquidGlassCardsLightIntensityKey)  ?? 0.50;
+    final liquidCardsThickness       = prefs.getDouble(_liquidGlassCardsThicknessKey)       ?? 20.0;
+    final liquidInputChromatic       = prefs.getDouble(_liquidGlassInputChromaticKey)       ?? 0.15;
+    final liquidInputRefractive      = prefs.getDouble(_liquidGlassInputRefractiveKey)      ?? 1.40;
+    final liquidInputLightIntensity  = prefs.getDouble(_liquidGlassInputLightIntensityKey)  ?? 0.50;
+    final liquidInputThickness       = prefs.getDouble(_liquidGlassInputThicknessKey)       ?? 20.0;
+    final liquidSearchChromatic       = prefs.getDouble(_liquidGlassSearchChromaticKey)       ?? 0.15;
+    final liquidSearchRefractive      = prefs.getDouble(_liquidGlassSearchRefractiveKey)      ?? 1.40;
+    final liquidSearchLightIntensity  = prefs.getDouble(_liquidGlassSearchLightIntensityKey)  ?? 0.50;
+    final liquidSearchThickness       = prefs.getDouble(_liquidGlassSearchThicknessKey)       ?? 24.0;
+    final liquidOnNavBar          = prefs.getBool(_liquidGlassOnNavBarKey) ?? false;
+    final liquidNavBarQualityStr  = prefs.getString(_liquidGlassNavBarQualityKey) ?? 'quality';
+    final liquidNavBarQualityVal  = LiquidGlassQuality.values.firstWhere((e) => e.name == liquidNavBarQualityStr, orElse: () => LiquidGlassQuality.quality);
+    final liquidCardsQualityStr   = prefs.getString(_liquidGlassCardsQualityKey)  ?? 'quality';
+    final liquidCardsQualityVal   = LiquidGlassQuality.values.firstWhere((e) => e.name == liquidCardsQualityStr,  orElse: () => LiquidGlassQuality.quality);
+    final liquidInputQualityStr   = prefs.getString(_liquidGlassInputQualityKey)  ?? 'quality';
+    final liquidInputQualityVal   = LiquidGlassQuality.values.firstWhere((e) => e.name == liquidInputQualityStr,  orElse: () => LiquidGlassQuality.quality);
+    final liquidSearchQualityStr  = prefs.getString(_liquidGlassSearchQualityKey) ?? 'quality';
+    final liquidSearchQualityVal  = LiquidGlassQuality.values.firstWhere((e) => e.name == liquidSearchQualityStr, orElse: () => LiquidGlassQuality.quality);
     final messagePagination = prefs.getBool(_messagePaginationKey) ?? true;
     final minimizeNav = prefs.getBool(_minimizeBottomNavKey) ?? false;
     final swipeTabs = prefs.getBool(_swipeTabsKey) ?? true;
@@ -263,6 +414,14 @@ class SettingsManager {
     }
 
     chatBackground.value = path;
+    chatVideoBackground.value = prefs.getString(_chatVideoBgKey);
+
+    final rawPresets = prefs.getStringList(_presetsKey) ?? [];
+    themePresets.value = rawPresets.map((s) {
+      try { return Map<String, dynamic>.from(jsonDecode(s) as Map); }
+      catch (_) { return null; }
+    }).whereType<Map<String, dynamic>>().toList();
+
     applyGlobally.value = apply;
     blurBackground.value = blur;
     blurSigma.value = sigma;
@@ -278,7 +437,47 @@ class SettingsManager {
     smoothScrollEnabled.value = smoothScroll;
     messageAnimationsEnabled.value = messageAnimations;
     enablePerformanceOptimizations.value = perfOptimizations;
-    SettingsManager.useLiquidGlass.value = useLiquidGlass;
+    SettingsManager.navBarStyle.value = navBarStyleVal;
+    SettingsManager.liquidGlassQuality.value   = liquidQualityVal;
+    SettingsManager.liquidGlassExpansion.value  = liquidExpansion;
+    SettingsManager.liquidGlassBlur.value       = liquidBlur;
+    SettingsManager.liquidGlassTint.value       = liquidTint;
+    SettingsManager.liquidGlassSaturation.value = liquidSaturation;
+    SettingsManager.liquidGlassOnCards.value           = liquidOnCards;
+    SettingsManager.liquidGlassCardsBlur.value          = liquidCardsBlur;
+    SettingsManager.liquidGlassCardsTint.value          = liquidCardsTint;
+    SettingsManager.liquidGlassCardsSaturation.value    = liquidCardsSaturation;
+    SettingsManager.liquidGlassJellyEnabled.value        = liquidJellyEnabled;
+    SettingsManager.liquidGlassOnInput.value             = liquidOnInput;
+    SettingsManager.liquidGlassInputBlur.value           = liquidInputBlur;
+    SettingsManager.liquidGlassInputTint.value           = liquidInputTint;
+    SettingsManager.liquidGlassInputSaturation.value     = liquidInputSaturation;
+    SettingsManager.liquidGlassOnSearch.value            = liquidOnSearch;
+    SettingsManager.liquidGlassSearchBlur.value          = liquidSearchBlur;
+    SettingsManager.liquidGlassSearchTint.value          = liquidSearchTint;
+    SettingsManager.liquidGlassSearchSaturation.value    = liquidSearchSaturation;
+    SettingsManager.liquidGlassChromatic.value           = liquidChromatic;
+    SettingsManager.liquidGlassRefractive.value          = liquidRefractive;
+    SettingsManager.liquidGlassLightIntensity.value      = liquidLightIntensity;
+    SettingsManager.liquidGlassThickness.value           = liquidThickness;
+    SettingsManager.liquidGlassCardsChromatic.value      = liquidCardsChromatic;
+    SettingsManager.liquidGlassCardsRefractive.value     = liquidCardsRefractive;
+    SettingsManager.liquidGlassCardsLightIntensity.value = liquidCardsLightIntensity;
+    SettingsManager.liquidGlassCardsThickness.value      = liquidCardsThickness;
+    SettingsManager.liquidGlassInputChromatic.value      = liquidInputChromatic;
+    SettingsManager.liquidGlassInputRefractive.value     = liquidInputRefractive;
+    SettingsManager.liquidGlassInputLightIntensity.value = liquidInputLightIntensity;
+    SettingsManager.liquidGlassInputThickness.value      = liquidInputThickness;
+    SettingsManager.liquidGlassSearchChromatic.value      = liquidSearchChromatic;
+    SettingsManager.liquidGlassSearchRefractive.value     = liquidSearchRefractive;
+    SettingsManager.liquidGlassSearchLightIntensity.value = liquidSearchLightIntensity;
+    SettingsManager.liquidGlassSearchThickness.value      = liquidSearchThickness;
+    SettingsManager.navBarStyle.value                  = NavBarStyle.liquid;
+    SettingsManager.liquidGlassOnNavBar.value          = liquidOnNavBar;
+    SettingsManager.liquidGlassNavBarQuality.value     = liquidNavBarQualityVal;
+    SettingsManager.liquidGlassCardsQuality.value      = liquidCardsQualityVal;
+    SettingsManager.liquidGlassInputQuality.value      = liquidInputQualityVal;
+    SettingsManager.liquidGlassSearchQuality.value     = liquidSearchQualityVal;
     SettingsManager.messagePaginationEnabled.value = messagePagination;
     SettingsManager.minimizeBottomNav.value = minimizeNav;
     SettingsManager.swipeTabsEnabled.value = swipeTabs;
@@ -361,6 +560,33 @@ class SettingsManager {
     }
 
     chatBackground.value = path;
+  }
+
+  static Future<void> setChatVideoBackground(String? path) async {
+    final prefs = await _getPrefs();
+    if (path == null) {
+      await prefs.remove(_chatVideoBgKey);
+    } else {
+      await prefs.setString(_chatVideoBgKey, path);
+    }
+    chatVideoBackground.value = path;
+  }
+
+  static Future<void> saveThemePreset(Map<String, dynamic> preset) async {
+    final prefs = await _getPrefs();
+    final list = List<Map<String, dynamic>>.from(themePresets.value);
+    list.add(preset);
+    await prefs.setStringList(_presetsKey, list.map(jsonEncode).toList());
+    themePresets.value = list;
+  }
+
+  static Future<void> deleteThemePreset(int index) async {
+    final prefs = await _getPrefs();
+    final list = List<Map<String, dynamic>>.from(themePresets.value);
+    if (index < 0 || index >= list.length) return;
+    list.removeAt(index);
+    await prefs.setStringList(_presetsKey, list.map(jsonEncode).toList());
+    themePresets.value = list;
   }
 
   static Future<void> setDebugMode(bool val) async {
@@ -453,10 +679,244 @@ class SettingsManager {
     enablePerformanceOptimizations.value = val;
   }
 
-  static Future<void> setUseLiquidGlass(bool val) async {
+  static Future<void> setNavBarStyle(NavBarStyle val) async {
     final prefs = await _getPrefs();
-    await prefs.setBool(_useLiquidGlassKey, val);
-    useLiquidGlass.value = val;
+    await prefs.setString(_navBarStyleKey, val.name);
+    navBarStyle.value = val;
+  }
+
+  static Future<void> setLiquidGlassQuality(LiquidGlassQuality val) async {
+    final prefs = await _getPrefs();
+    await prefs.setString(_liquidGlassQualityKey, val.name);
+    liquidGlassQuality.value = val;
+  }
+
+  static Future<void> setLiquidGlassOnNavBar(bool val) async {
+    final prefs = await _getPrefs();
+    await prefs.setBool(_liquidGlassOnNavBarKey, val);
+    liquidGlassOnNavBar.value = val;
+  }
+
+  static Future<void> setLiquidGlassNavBarQuality(LiquidGlassQuality val) async {
+    final prefs = await _getPrefs();
+    await prefs.setString(_liquidGlassNavBarQualityKey, val.name);
+    liquidGlassNavBarQuality.value = val;
+  }
+
+  static Future<void> setLiquidGlassCardsQuality(LiquidGlassQuality val) async {
+    final prefs = await _getPrefs();
+    await prefs.setString(_liquidGlassCardsQualityKey, val.name);
+    liquidGlassCardsQuality.value = val;
+  }
+
+  static Future<void> setLiquidGlassInputQuality(LiquidGlassQuality val) async {
+    final prefs = await _getPrefs();
+    await prefs.setString(_liquidGlassInputQualityKey, val.name);
+    liquidGlassInputQuality.value = val;
+  }
+
+  static Future<void> setLiquidGlassSearchQuality(LiquidGlassQuality val) async {
+    final prefs = await _getPrefs();
+    await prefs.setString(_liquidGlassSearchQualityKey, val.name);
+    liquidGlassSearchQuality.value = val;
+  }
+
+  static Future<void> setLiquidGlassExpansion(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassExpansionKey, val);
+    liquidGlassExpansion.value = val;
+  }
+
+  static Future<void> setLiquidGlassBlur(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassBlurKey, val);
+    liquidGlassBlur.value = val;
+  }
+
+  static Future<void> setLiquidGlassTint(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassTintKey, val);
+    liquidGlassTint.value = val;
+  }
+
+  static Future<void> setLiquidGlassSaturation(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassSaturationKey, val);
+    liquidGlassSaturation.value = val;
+  }
+
+  static Future<void> setLiquidGlassOnCards(bool val) async {
+    final prefs = await _getPrefs();
+    await prefs.setBool(_liquidGlassOnCardsKey, val);
+    liquidGlassOnCards.value = val;
+  }
+
+  static Future<void> setLiquidGlassCardsBlur(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassCardsBlurKey, val);
+    liquidGlassCardsBlur.value = val;
+  }
+
+  static Future<void> setLiquidGlassCardsTint(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassCardsTintKey, val);
+    liquidGlassCardsTint.value = val;
+  }
+
+  static Future<void> setLiquidGlassCardsSaturation(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassCardsSaturationKey, val);
+    liquidGlassCardsSaturation.value = val;
+  }
+
+  static Future<void> setLiquidGlassJellyEnabled(bool val) async {
+    final prefs = await _getPrefs();
+    await prefs.setBool(_liquidGlassJellyEnabledKey, val);
+    liquidGlassJellyEnabled.value = val;
+  }
+
+  static Future<void> setLiquidGlassOnInput(bool val) async {
+    final prefs = await _getPrefs();
+    await prefs.setBool(_liquidGlassOnInputKey, val);
+    liquidGlassOnInput.value = val;
+  }
+
+  static Future<void> setLiquidGlassInputBlur(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassInputBlurKey, val);
+    liquidGlassInputBlur.value = val;
+  }
+
+  static Future<void> setLiquidGlassInputTint(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassInputTintKey, val);
+    liquidGlassInputTint.value = val;
+  }
+
+  static Future<void> setLiquidGlassInputSaturation(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassInputSaturationKey, val);
+    liquidGlassInputSaturation.value = val;
+  }
+
+  static Future<void> setLiquidGlassOnSearch(bool val) async {
+    final prefs = await _getPrefs();
+    await prefs.setBool(_liquidGlassOnSearchKey, val);
+    liquidGlassOnSearch.value = val;
+  }
+
+  static Future<void> setLiquidGlassSearchBlur(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassSearchBlurKey, val);
+    liquidGlassSearchBlur.value = val;
+  }
+
+  static Future<void> setLiquidGlassSearchTint(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassSearchTintKey, val);
+    liquidGlassSearchTint.value = val;
+  }
+
+  static Future<void> setLiquidGlassSearchSaturation(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassSearchSaturationKey, val);
+    liquidGlassSearchSaturation.value = val;
+  }
+
+  static Future<void> setLiquidGlassChromatic(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassChromaticKey, val);
+    liquidGlassChromatic.value = val;
+  }
+
+  static Future<void> setLiquidGlassRefractive(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassRefractiveKey, val);
+    liquidGlassRefractive.value = val;
+  }
+
+  static Future<void> setLiquidGlassLightIntensity(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassLightIntensityKey, val);
+    liquidGlassLightIntensity.value = val;
+  }
+
+  static Future<void> setLiquidGlassThickness(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassThicknessKey, val);
+    liquidGlassThickness.value = val;
+  }
+
+  static Future<void> setLiquidGlassCardsChromatic(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassCardsChromaticKey, val);
+    liquidGlassCardsChromatic.value = val;
+  }
+
+  static Future<void> setLiquidGlassCardsRefractive(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassCardsRefractiveKey, val);
+    liquidGlassCardsRefractive.value = val;
+  }
+
+  static Future<void> setLiquidGlassCardsLightIntensity(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassCardsLightIntensityKey, val);
+    liquidGlassCardsLightIntensity.value = val;
+  }
+
+  static Future<void> setLiquidGlassCardsThickness(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassCardsThicknessKey, val);
+    liquidGlassCardsThickness.value = val;
+  }
+
+  static Future<void> setLiquidGlassInputChromatic(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassInputChromaticKey, val);
+    liquidGlassInputChromatic.value = val;
+  }
+
+  static Future<void> setLiquidGlassInputRefractive(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassInputRefractiveKey, val);
+    liquidGlassInputRefractive.value = val;
+  }
+
+  static Future<void> setLiquidGlassInputLightIntensity(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassInputLightIntensityKey, val);
+    liquidGlassInputLightIntensity.value = val;
+  }
+
+  static Future<void> setLiquidGlassInputThickness(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassInputThicknessKey, val);
+    liquidGlassInputThickness.value = val;
+  }
+
+  static Future<void> setLiquidGlassSearchChromatic(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassSearchChromaticKey, val);
+    liquidGlassSearchChromatic.value = val;
+  }
+
+  static Future<void> setLiquidGlassSearchRefractive(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassSearchRefractiveKey, val);
+    liquidGlassSearchRefractive.value = val;
+  }
+
+  static Future<void> setLiquidGlassSearchLightIntensity(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassSearchLightIntensityKey, val);
+    liquidGlassSearchLightIntensity.value = val;
+  }
+
+  static Future<void> setLiquidGlassSearchThickness(double val) async {
+    final prefs = await _getPrefs();
+    await prefs.setDouble(_liquidGlassSearchThicknessKey, val);
+    liquidGlassSearchThickness.value = val;
   }
 
   static Future<void> setMessagePaginationEnabled(bool val) async {
@@ -608,15 +1068,23 @@ class SettingsManager {
   }
 
   static Future<void> setPin(String pin) async {
-    await SecureStore.write( _pinCodeSecureKey, pin);
+    await SecureStore.write(_pinCodeSecureKey, pin);
+    // On desktop: migrate storage to v3 (PIN-derived encryption).
+    if (!kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
+      await FallbackStorage.main.migrateToV3(pin);
+    }
   }
 
   static Future<String?> getPin() async {
-    return await SecureStore.read( _pinCodeSecureKey);
+    return await SecureStore.read(_pinCodeSecureKey);
   }
 
   static Future<void> clearPin() async {
     await SecureStore.delete(_pinCodeSecureKey);
+    // On desktop: migrate storage back to v2 (machine-derived encryption).
+    if (!kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
+      await FallbackStorage.main.migrateToV2();
+    }
   }
 
   static Future<void> setBiometricEnabled(bool val) async {

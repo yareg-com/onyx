@@ -37,9 +37,8 @@ class _LocalFile {
 class _LocalType {
   final String dirName;
   final IconData icon;
-  final String label;
   final bool isImage;
-  const _LocalType(this.dirName, this.icon, this.label, {this.isImage = false});
+  const _LocalType(this.dirName, this.icon, {this.isImage = false});
 }
 
 class _LocalTypeInfo {
@@ -56,14 +55,14 @@ class _LocalTypeInfo {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const _localTypes = [
-  _LocalType('image_cache',    Icons.image_outlined,             'Images',    isImage: true),
-  _LocalType('voice_cache',    Icons.mic_outlined,               'Voice'),
-  _LocalType('audio_cache',    Icons.music_note_outlined,        'Audio'),
-  _LocalType('video_cache',    Icons.videocam_outlined,          'Video'),
-  _LocalType('file_cache',     Icons.insert_drive_file_outlined, 'Files'),
-  _LocalType('document_cache', Icons.description_outlined,       'Documents'),
-  _LocalType('archive_cache',  Icons.folder_zip_outlined,        'Archives'),
-  _LocalType('data_cache',     Icons.storage_outlined,           'Data'),
+  _LocalType('image_cache',    Icons.image_outlined,             isImage: true),
+  _LocalType('voice_cache',    Icons.mic_outlined),
+  _LocalType('audio_cache',    Icons.music_note_outlined),
+  _LocalType('video_cache',    Icons.videocam_outlined),
+  _LocalType('file_cache',     Icons.insert_drive_file_outlined),
+  _LocalType('document_cache', Icons.description_outlined),
+  _LocalType('archive_cache',  Icons.folder_zip_outlined),
+  _LocalType('data_cache',     Icons.storage_outlined),
 ];
 
 const _serverTypes = ['image', 'voice', 'video', 'file', 'avatar'];
@@ -239,6 +238,12 @@ class _CacheManagerSheetState extends State<_CacheManagerSheet>
   }
 
   Future<void> _clearLocalType(_LocalTypeInfo info) async {
+    final l = AppLocalizations.of(context);
+    final ok = await _confirm(
+      l.cacheClearTabTitle,
+      l.cacheClearTabContent(_localTypeLabel(info.type.dirName, l)),
+    );
+    if (!ok || !mounted) return;
     final dirName = info.type.dirName;
     setState(() => _clearingLocal.add(dirName));
     try {
@@ -589,6 +594,20 @@ class _CacheManagerSheetState extends State<_CacheManagerSheet>
     }
   }
 
+  String _localTypeLabel(String dirName, AppLocalizations l) {
+    switch (dirName) {
+      case 'image_cache': return l.cacheTabImages;
+      case 'voice_cache': return l.cacheTabVoice;
+      case 'audio_cache': return l.cacheTabAudio;
+      case 'video_cache': return l.cacheTabVideo;
+      case 'file_cache': return l.cacheTabFiles;
+      case 'document_cache': return l.cacheTabDocuments;
+      case 'archive_cache': return l.cacheTabArchives;
+      case 'data_cache': return l.cacheTabData;
+      default: return dirName;
+    }
+  }
+
   IconData _serverTypeIcon(String type) {
     switch (type) {
       case 'image':  return Icons.image_outlined;
@@ -754,7 +773,7 @@ class _CacheManagerSheetState extends State<_CacheManagerSheet>
         ListTile(
           leading: Icon(info.type.icon, size: 22,
               color: isEmpty ? cs.onSurfaceVariant.withValues(alpha: 0.35) : null),
-          title: Text(info.type.label,
+          title: Text(_localTypeLabel(info.type.dirName, l),
               style: TextStyle(
                   color: isEmpty
                       ? cs.onSurfaceVariant.withValues(alpha: 0.4)

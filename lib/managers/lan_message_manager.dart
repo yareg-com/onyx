@@ -24,8 +24,10 @@ class LANMessageManager {
   RawDatagramSocket? _messageSocket;
 
   final Map<String, InternetAddress> _discoveredDevices = {};
-
   final Map<String, List<int>> _peerPubKeys = {};
+  final Map<String, Map<String, String>> _peerDeviceInfo = {};
+
+  String? _currentUsername;
 
   Function(ChatMessage)? onMessageReceived;
   Function(String, String, Uint8List, String, String, Map<String, dynamic>?)? onMediaReceived;
@@ -35,6 +37,7 @@ class LANMessageManager {
 
   final Map<String, Map<int, String>> _chunkBuffers  = {};
   final Map<String, Map<String, dynamic>> _chunkMetadata = {};
+
 
   final _x25519  = X25519();
   final _aesGcm  = AesGcm.with256bits();
@@ -91,6 +94,7 @@ class LANMessageManager {
   Future<void> initialize(String username) async {
     if (_isInitialized) return;
 
+    _currentUsername = username;
     _ephemeralKeyPair    = await _x25519.newKeyPair();
     final ephPub         = await _ephemeralKeyPair!.extractPublicKey();
     _ephemeralPubKeyBytes = ephPub.bytes;
@@ -121,10 +125,12 @@ class LANMessageManager {
     if (_ephemeralPubKeyBytes == null) return;
 
     final message = utf8.encode(jsonEncode({
-      'type':      'discover',
-      'username':  username,
-      'timestamp': DateTime.now().millisecondsSinceEpoch,
-      'pubkey':    base64Encode(_ephemeralPubKeyBytes!),
+      'type':       'discover',
+      'username':   username,
+      'timestamp':  DateTime.now().millisecondsSinceEpoch,
+      'pubkey':     base64Encode(_ephemeralPubKeyBytes!),
+      'os':         Platform.operatingSystem,
+      'deviceName': Platform.localHostname,
     }));
 
     // Send on every IPv4 interface so both Ethernet and WiFi are covered.
@@ -177,6 +183,10 @@ class LANMessageManager {
           if (username == null) return;
 
           _discoveredDevices[username] = datagram.address;
+          _peerDeviceInfo[username] = {
+            'os':         data['os'] as String? ?? 'unknown',
+            'deviceName': data['deviceName'] as String? ?? username,
+          };
 
           final pubkeyB64 = data['pubkey'] as String?;
           if (pubkeyB64 != null) {
@@ -461,16 +471,131 @@ class LANMessageManager {
     }
   }
 
+
   bool isUserAvailableInLAN(String username) =>
       _discoveredDevices.containsKey(username);
 
   List<String> getDiscoveredUsers() => _discoveredDevices.keys.toList();
+
+  Future<void> refreshDiscovery() async {
+    if (_currentUsername == null) return;
+    await _broadcastDiscovery(_currentUsername!);
+  }
+
+  // ── USB tethering helpers ───────────────────────────────────────────────────
+
+  // Known IP prefixes created by Android USB tethering (RNDIS) and Linux
+  // NetworkManager USB sharing.
+  static const _usbPrefixes = ['192.168.42.', '10.42.0.'];
+
+  bool _isUsbAddress(String ip) =>
+      _usbPrefixes.any((prefix) => ip.startsWith(prefix));
+
+  /// Returns only peers whose discovered IP is on a USB tethering subnet.
+  Map<String, Map<String, String>> getUsbTetheredPeerInfo() {
+    final result = <String, Map<String, String>>{};
+    for (final entry in _peerDeviceInfo.entries) {
+      final addr = _discoveredDevices[entry.key];
+      if (addr != null && _isUsbAddress(addr.address)) {
+        result[entry.key] = entry.value;
+      }
+    }
+    return Map.unmodifiable(result);
+  }
+
+  /// True if this device has any active USB tethering interface.
+  Future<bool> hasUsbInterface() async {
+    try {
+      final interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+        includeLoopback: false,
+      );
+      return interfaces.any(
+        (iface) => iface.addresses.any((a) => _isUsbAddress(a.address)),
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Broadcasts discovery only on USB tethering interfaces.
+  Future<void> refreshUsbDiscovery() async {
+    if (_currentUsername == null || _ephemeralPubKeyBytes == null) return;
+
+    List<NetworkInterface> interfaces = [];
+    try {
+      interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+        includeLoopback: false,
+      );
+    } catch (e) {
+      if (kDebugMode) print('[LAN] USB refresh — NetworkInterface.list error: $e');
+      return;
+    }
+
+    final usbAddresses = interfaces
+        .expand((i) => i.addresses)
+        .where((a) => _isUsbAddress(a.address))
+        .toList();
+
+    if (usbAddresses.isEmpty) {
+      if (kDebugMode) print('[LAN] No USB tethering interface found');
+      return;
+    }
+
+    final message = utf8.encode(jsonEncode({
+      'type':       'discover',
+      'username':   _currentUsername,
+      'timestamp':  DateTime.now().millisecondsSinceEpoch,
+      'pubkey':     base64Encode(_ephemeralPubKeyBytes!),
+      'os':         Platform.operatingSystem,
+      'deviceName': Platform.localHostname,
+    }));
+
+    for (final addr in usbAddresses) {
+      try {
+        final socket = await RawDatagramSocket.bind(addr, 0);
+        socket.broadcastEnabled = true;
+        socket.send(message, InternetAddress('255.255.255.255'), discoveryPort);
+        await Future.delayed(const Duration(milliseconds: 50));
+        socket.close();
+        if (kDebugMode) print('[LAN] USB discovery broadcast from ${addr.address}');
+      } catch (e) {
+        if (kDebugMode) print('[LAN] USB broadcast error on ${addr.address}: $e');
+      }
+    }
+  }
+
+  Future<bool> _sendSimplePacket(String recipientUsername, Map<String, dynamic> payload) async {
+    final addr = _discoveredDevices[recipientUsername];
+    if (addr == null) return false;
+    final pub  = _peerPubKeys[recipientUsername];
+    if (pub == null) return false;
+    try {
+      final encrypted = await _encryptPacket(jsonEncode(payload), pub);
+      final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      socket.send(encrypted, addr, messagePort);
+      await Future.delayed(const Duration(milliseconds: 100));
+      socket.close();
+      return true;
+    } catch (e) {
+      if (kDebugMode) print('[LAN] _sendSimplePacket failed: $e');
+      return false;
+    }
+  }
+
+
+  /// Returns a map of username → {os, deviceName} for all discovered peers.
+  Map<String, Map<String, String>> getDiscoveredPeerInfo() =>
+      Map.unmodifiable(_peerDeviceInfo);
+
 
   void dispose() {
     _discoverySocket?.close();
     _messageSocket?.close();
     _discoveredDevices.clear();
     _peerPubKeys.clear();
+    _peerDeviceInfo.clear();
     _chunkBuffers.clear();
     _chunkMetadata.clear();
     _isInitialized = false;

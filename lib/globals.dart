@@ -99,7 +99,7 @@ const String wsUrl = 'wss://api-onyx.wardcore.com/ws';
 const String publicIpApi = 'https://api.ipify.org';
 
 
-const String kAppVersion = 'v1.5-beta';
+const String kAppVersion = 'v1.6-beta';
 
 bool get isDesktop {
   if (kIsWeb) return false;

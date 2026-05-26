@@ -10,8 +10,9 @@ import 'package:gallery_saver_plus/gallery_saver.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 import '../globals.dart';
-import '../screens/chat_screen.dart';
 import '../managers/external_server_manager.dart';
+import 'album_message_widget.dart';
+import 'chat_images_scope.dart';
 import '../utils/image_size_cache.dart';
 import '../utils/image_file_cache.dart';
 
@@ -97,12 +98,19 @@ class _ImageMessageWidgetState extends State<ImageMessageWidget> {
 
       if (widget.filename.startsWith('lan://')) {
         debugPrint('[ImageWidget] LAN file detected: ${widget.filename}');
-        
-        final lanFilename = widget.filename.substring(6); 
+
+        final lanFilename = widget.filename.substring(6);
         final appDocuments = await getApplicationDocumentsDirectory();
         cachedFile = File('${appDocuments.path}/lan_media/$lanFilename');
         if (!(await cachedFile.exists())) {
           throw Exception('LAN file not found: $lanFilename');
+        }
+      } else if (widget.filename.startsWith('fav://')) {
+        final favFilename = widget.filename.substring(6);
+        final appDocuments = await getApplicationDocumentsDirectory();
+        cachedFile = File('${appDocuments.path}/fav_media/$favFilename');
+        if (!(await cachedFile.exists())) {
+          throw Exception('Favorites file not found: $favFilename');
         }
       } else if (widget.filename.startsWith('http')) {
         
@@ -211,8 +219,16 @@ class _ImageMessageWidgetState extends State<ImageMessageWidget> {
       }
 
       if (Platform.isAndroid || Platform.isIOS) {
-        
-        final saved = await GallerySaver.saveImage(file.path, albumName: 'ONYX');
+        File saveFile = file;
+        File? tempJpg;
+        if (p.extension(file.path).toLowerCase() == '.jfif') {
+          final tmp = await getTemporaryDirectory();
+          tempJpg = File('${tmp.path}/${p.basenameWithoutExtension(file.path)}.jpg');
+          await file.copy(tempJpg.path);
+          saveFile = tempJpg;
+        }
+        final saved = await GallerySaver.saveImage(saveFile.path, albumName: 'ONYX');
+        await tempJpg?.delete().catchError((_) => File(''));
         if (saved == true) {
           rootScreenKey.currentState?.showSnack('Saved to gallery');
         } else {
@@ -277,7 +293,23 @@ class _ImageMessageWidgetState extends State<ImageMessageWidget> {
 
   void _showFullscreen(File file) {
     FocusScope.of(context).unfocus(disposition: UnfocusDisposition.scope);
-    final chatState = context.findAncestorStateOfType<ChatScreenState>();
+
+    final scope = ChatImagesScope.maybeOf(context);
+    if (scope != null && scope.allImages.isNotEmpty) {
+      final idx = scope.allImages.indexWhere((i) => i.filename == widget.filename);
+      if (idx >= 0) {
+        Navigator.of(context).push(MaterialPageRoute(
+          fullscreenDialog: true,
+          builder: (_) => AlbumGallery(
+            allItems: scope.allImages,
+            initialIndex: idx,
+            peerUsername: widget.peerUsername,
+            isOutgoing: widget.isOutgoing,
+          ),
+        ));
+        return;
+      }
+    }
 
     Future.microtask(() {
       if (!mounted) return;
@@ -343,9 +375,7 @@ class _ImageMessageWidgetState extends State<ImageMessageWidget> {
             ),
           ),
         ),
-      ).then((_) {
-
-      });
+      );
     });
   }
 

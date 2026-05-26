@@ -1,7 +1,31 @@
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show kIsWeb, debugPrint;
+import 'package:gallery_saver_plus/gallery_saver.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+
+/// Saves an image to the device gallery, handling .jfif by copying to .jpg first
+/// (some native gallery plugins do not recognise the .jfif extension).
+Future<bool> saveImageToGallery(String filePath,
+    {String albumName = 'ONYX'}) async {
+  File fileToSave = File(filePath);
+  File? tempJpg;
+  if (p.extension(filePath).toLowerCase() == '.jfif') {
+    final tmp = await getTemporaryDirectory();
+    final tempPath =
+        '${tmp.path}/${p.basenameWithoutExtension(filePath)}.jpg';
+    tempJpg = await File(filePath).copy(tempPath);
+    fileToSave = tempJpg;
+  }
+  try {
+    return await GallerySaver.saveImage(fileToSave.path,
+            albumName: albumName) ==
+        true;
+  } finally {
+    await tempJpg?.delete().catchError((_) => File(''));
+  }
+}
 
 /// Opens the system file manager and selects/reveals [filePath].
 /// Only works on desktop platforms (Windows, macOS, Linux).
@@ -22,7 +46,7 @@ Future<void> revealInFileSystem(String filePath) async {
 
 class FileTypeDetector {
   static const imageExtensions = {
-    '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'
+    '.jpg', '.jpeg', '.jfif', '.png', '.gif', '.webp', '.bmp', '.svg'
   };
 
   static const videoExtensions = {

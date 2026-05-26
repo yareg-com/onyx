@@ -1,5 +1,6 @@
 // lib/widgets/emoji_picker_dialog.dart
 import 'package:flutter/material.dart';
+import '../l10n/app_localizations.dart';
 import '../managers/settings_manager.dart';
 
 // ─── Emoji data ───────────────────────────────────────────────────────────────
@@ -193,6 +194,7 @@ class _EmojiPickerDialogState extends State<EmojiPickerDialog>
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final mq = MediaQuery.of(context);
+    final l = AppLocalizations.of(context);
     final sheetHeight = mq.size.height * 0.55;
 
     return ValueListenableBuilder<double>(
@@ -240,7 +242,7 @@ class _EmojiPickerDialogState extends State<EmojiPickerDialog>
                   child: TextField(
                     controller: _searchCtrl,
                     decoration: InputDecoration(
-                      hintText: 'Search emoji…',
+                      hintText: l.searchEmoji,
                       prefixIcon: const Icon(Icons.search, size: 20),
                       contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                       border: OutlineInputBorder(

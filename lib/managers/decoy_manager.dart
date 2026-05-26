@@ -1,7 +1,9 @@
 // lib/managers/decoy_manager.dart
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'secure_store.dart';
+import 'fallback_storage.dart';
 
 class DecoyManager {
   DecoyManager._();
@@ -30,8 +32,22 @@ class DecoyManager {
   }
 
   static Future<String?> getPin() => SecureStore.read(_pinKey);
-  static Future<void> setPin(String pin) => SecureStore.write(_pinKey, pin);
-  static Future<void> clearPin() => SecureStore.delete(_pinKey);
+
+  static Future<void> setPin(String pin) async {
+    await SecureStore.write(_pinKey, pin);
+    // On desktop: create/update the separate decoy v3 partition.
+    if (!kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
+      await FallbackStorage.decoy.createWithPin(pin);
+    }
+  }
+
+  static Future<void> clearPin() async {
+    await SecureStore.delete(_pinKey);
+    // On desktop: delete the decoy v3 partition.
+    if (!kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
+      await FallbackStorage.decoy.deleteStorage();
+    }
+  }
 
   static Future<void> disable() async {
     await clearPin();

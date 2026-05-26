@@ -17,6 +17,7 @@ class ExternalServerJoinScreen extends StatefulWidget {
 class _ExternalServerJoinScreenState extends State<ExternalServerJoinScreen> {
   final _hostController = TextEditingController();
   final _usernameController = TextEditingController();
+  final _nicknameController = TextEditingController();
   final _passwordController = TextEditingController();
   bool _loading = false;
   bool _obscurePassword = true;
@@ -36,6 +37,9 @@ class _ExternalServerJoinScreenState extends State<ExternalServerJoinScreen> {
     final current = await AccountManager.getCurrentAccount();
     if (current != null && mounted) {
       _usernameController.text = current;
+      if (_nicknameController.text.isEmpty) {
+        _nicknameController.text = current;
+      }
     }
   }
 
@@ -43,6 +47,7 @@ class _ExternalServerJoinScreenState extends State<ExternalServerJoinScreen> {
   void dispose() {
     _hostController.dispose();
     _usernameController.dispose();
+    _nicknameController.dispose();
     _passwordController.dispose();
     super.dispose();
   }
@@ -93,7 +98,6 @@ class _ExternalServerJoinScreenState extends State<ExternalServerJoinScreen> {
 
     var username = _usernameController.text.trim();
     if (username.isEmpty) {
-      
       await _loadDefaultUsername();
       username = _usernameController.text.trim();
       if (username.isEmpty) {
@@ -101,6 +105,9 @@ class _ExternalServerJoinScreenState extends State<ExternalServerJoinScreen> {
         return;
       }
     }
+
+    final nickname = _nicknameController.text.trim();
+    final effectiveName = nickname.isEmpty ? username : nickname;
 
     final password = _passwordController.text;
     if (!isChannel && password.isEmpty) {
@@ -114,9 +121,9 @@ class _ExternalServerJoinScreenState extends State<ExternalServerJoinScreen> {
       final server = await ExternalServerManager.registerOnServer(
         host: _parsedHost,
         port: _parsedPort,
-        username: username,
-        displayName: username,
-        password: isChannel ? '' : password,  
+        username: effectiveName,
+        displayName: effectiveName,
+        password: isChannel ? '' : password,
         serverInfo: _serverInfo!,
       );
 
@@ -188,50 +195,16 @@ class _ExternalServerJoinScreenState extends State<ExternalServerJoinScreen> {
               const SecurityWarningCard(),
               const SizedBox(height: 16),
 
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: colorScheme.primaryContainer.withValues(alpha: 0.2),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: colorScheme.primary.withValues(alpha: 0.3)),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(Icons.info_outline, color: colorScheme.primary, size: 20),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Your identity will be visible to the server',
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                                color: colorScheme.onSurface,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Row(
-                              children: [
-                                Text(
-                                  'Username: ',
-                                  style: TextStyle(fontSize: 11, color: colorScheme.onSurface.withValues(alpha: 0.7)),
-                                ),
-                                Text(
-                                  _usernameController.text,
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w600,
-                                    color: colorScheme.primary,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
+                TextField(
+                  controller: _nicknameController,
+                  decoration: InputDecoration(
+                    labelText: 'Your name on this server',
+                    hintText: _usernameController.text,
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                    prefixIcon: const Icon(Icons.person_outline),
+                    helperText:
+                        'Others will see you under this name. Can be anything.',
                   ),
                 ),
                 const SizedBox(height: 12),

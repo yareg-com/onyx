@@ -289,6 +289,46 @@ class AppLocalizations {
   String get authPasswordLabel => _ru ? 'Пароль (мин. 16 симв.)' : 'Password (min 16 chars)';
   String get loginBtn => _ru ? 'Войти' : 'Login';
   String get registerBtn => _ru ? 'Регистрация' : 'Register';
+
+  // QR auth / device linking
+  String get deviceAuthTitle => _ru ? 'Привязать устройство' : 'Link Device';
+  String get deviceAuthTabQr => 'QR';
+  String get deviceAuthTabScan => _ru ? 'Скан' : 'Scan';
+  String get deviceAuthLanNote => _ru
+      ? 'Оба устройства должны быть в одной локальной сети'
+      : 'Both devices must be on the same local network';
+  String get loginWithQr => _ru ? 'Войти по QR' : 'Login via QR';
+  String get qrAuthWaitingTitle => _ru ? 'Ожидание телефона' : 'Waiting for phone';
+  String get qrAuthWaitingSubtitle => _ru
+      ? 'Отсканируйте этот код на авторизованном устройстве — оно передаст сессию на этот экран'
+      : 'Scan this code on an authorized device to transfer the session here';
+  String get qrAuthSuccess => _ru ? 'Устройство авторизовано' : 'Device authorized';
+  String get qrAuthFailed => _ru ? 'Ошибка QR-авторизации' : 'QR auth failed';
+  String get qrAuthCancelled => _ru ? 'QR-авторизация отменена' : 'QR auth cancelled';
+  String get authorizeDevice => _ru ? 'Авторизовать устройство' : 'Authorize device';
+  String get authorizeDeviceSubtitle => _ru
+      ? 'Разрешить другому устройству войти через QR-код'
+      : 'Allow another device to log in by scanning a QR code';
+  String get authorizeDeviceScanHint => _ru
+      ? 'Наведите камеру на QR-код, отображаемый на другом устройстве'
+      : 'Point the camera at the QR code shown on the other device';
+  String get authorizeDeviceSuccess => _ru ? 'Устройство успешно авторизовано' : 'Device authorized successfully';
+  String get authorizeDeviceFailed => _ru ? 'Не удалось авторизовать устройство' : 'Failed to authorize device';
+  String get authorizeDeviceSending => _ru ? 'Отправка данных...' : 'Sending credentials…';
+  String get qrAuthEncryptedNote => _ru
+      ? 'Передача зашифрована (X25519 + AES-256-GCM)'
+      : 'Transfer is encrypted (X25519 + AES-256-GCM)';
+  // Desktop → Phone grant flow
+  String get scanFromPc => _ru ? 'Получить с компьютера' : 'Receive from PC';
+  String get scanFromPcHint => _ru
+      ? 'Наведите камеру на QR-код, отображаемый на другом устройстве, чтобы войти здесь'
+      : 'Point the camera at the QR code shown on another device to sign in here';
+  String get grantDeviceTitle => _ru ? 'Авторизовать телефон' : 'Authorize phone';
+  String get grantDeviceSubtitle => _ru
+      ? 'Отсканируйте этот код на другом устройстве — оно получит доступ к этому аккаунту'
+      : 'Scan this code on another device to sign in there with this account';
+  String get grantDeviceSuccess => _ru ? 'Телефон успешно авторизован' : 'Phone authorized successfully';
+  String get grantDeviceFailed => _ru ? 'Не удалось авторизовать телефон' : 'Failed to authorize phone';
   String get enterUsernameMsg => _ru ? 'Введите имя пользователя' : 'Enter your username';
   String get loginSuccess => _ru ? 'Вход выполнен' : 'Login successful';
   String get loginFailed => _ru ? 'Ошибка входа' : 'Login failed';
@@ -379,8 +419,12 @@ class AppLocalizations {
   String get serverMediaManagerTitle => _ru ? 'Серверные медиа' : 'Server Media';
   String get cacheTabImages => _ru ? 'Изображения' : 'Images';
   String get cacheTabVoice => _ru ? 'Голос' : 'Voice';
+  String get cacheTabAudio => _ru ? 'Аудио' : 'Audio';
   String get cacheTabVideo => _ru ? 'Видео' : 'Video';
   String get cacheTabFiles => _ru ? 'Файлы' : 'Files';
+  String get cacheTabDocuments => _ru ? 'Документы' : 'Documents';
+  String get cacheTabArchives => _ru ? 'Архивы' : 'Archives';
+  String get cacheTabData => _ru ? 'Данные' : 'Data';
   String get cacheTabAvatars => _ru ? 'Аватары' : 'Avatars';
   String get cacheNoFiles => _ru ? 'Нет файлов в этой категории' : 'No files in this category';
   String get cacheClearTabTitle => _ru ? 'Очистить категорию?' : 'Clear category?';
@@ -393,6 +437,13 @@ class AppLocalizations {
   String get cacheFileDeleteFailed => _ru ? 'Не удалось удалить файл' : 'Failed to delete file';
   String get cacheClearAll => _ru ? 'Очистить всё' : 'Clear All';
   String get cacheClearTab => _ru ? 'Очистить вкладку' : 'Clear tab';
+  String get cleanUnusedFiles => _ru ? 'Очистить неиспользуемые файлы' : 'Clean unused files';
+  String get cleaningUnusedFiles => _ru ? 'Очистка...' : 'Cleaning...';
+  String get orphanedCleanupAppNotReady => _ru ? 'Приложение ещё не готово' : 'App not ready';
+  String get orphanedCleanupNoFiles => _ru ? 'Неиспользуемые файлы не найдены' : 'No unused files found';
+  String orphanedCleanupDeleted(int files, String freedMb) => _ru
+      ? 'Удалено $files неиспользуем${files == 1 ? 'ый файл' : files < 5 ? 'ых файла' : 'ых файлов'} ($freedMb MB освобождено)'
+      : 'Deleted $files unused file${files == 1 ? '' : 's'} ($freedMb MB freed)';
   String get manageCacheTitle => _ru ? 'Управление кэшем' : 'Manage Cache';
   String get manageCacheButton => _ru ? 'Управление кэшем медиа' : 'Manage Media Cache';
   String get localCacheTab => _ru ? 'Локальный' : 'Local';
@@ -447,6 +498,28 @@ class AppLocalizations {
   String get messageAnimations => _ru ? 'Анимации сообщений' : 'Message animations';
   String get loadOlderMessagesOnScroll => _ru ? 'Загружать старые сообщения' : 'Load older messages on scroll';
   String get chooseBackground => _ru ? 'Выбрать' : 'Choose';
+  String get presetsBackground => _ru ? 'Пресеты' : 'Presets';
+  String get clearBackground2 => _ru ? 'Очистить' : 'Clear';
+  String get liquidGlassSubtitle => _ru ? 'Настройки эффектов стекла для каждого элемента' : 'Configure glass effects and quality per element';
+  String get liquidGlassNavBarLabel => _ru ? 'Навигационная панель' : 'Navigation Bar';
+  String get liquidGlassNavBarDesc => _ru ? 'Эффект стекла нижней навигации' : 'Glass effect on the bottom navigation bar';
+  String get liquidGlassCardsLabel => _ru ? 'Карточки и список' : 'Cards & List Items';
+  String get liquidGlassCardsDesc => _ru ? 'Эффект стекла в списке чатов и настройках' : 'Glass effect on chat list and settings cards';
+  String get liquidGlassInputLabel => _ru ? 'Панель ввода' : 'Input Bar';
+  String get liquidGlassInputDesc => _ru ? 'Эффект стекла панели ввода' : 'Glass effect on the message composition bar';
+  String get liquidGlassSearchLabel => _ru ? 'Поиск' : 'Search';
+  String get liquidGlassSearchDesc => _ru ? 'Стеклянная панель поиска' : 'Spotlight-style glass panel for user search';
+  String get sendFavoritesScanHint => _ru ? 'Наведите камеру на QR-код\nна устройстве получателя' : 'Point the camera at the QR code shown on the receiver device';
+  String get mediaPickerGallery => _ru ? 'Галерея' : 'Gallery';
+  String get mediaPickerCamera => _ru ? 'Камера' : 'Camera';
+  String get mediaPickerFile => _ru ? 'Файл' : 'File';
+  String mediaPickerSend(int n) => _ru ? 'Отправить $n' : 'Send $n';
+  String get mediaPickerChooseWallpaper => _ru ? 'Выбрать обои' : 'Choose wallpaper';
+  String get mediaPickerFiles => _ru ? 'Файлы' : 'Files';
+  String get mediaPickerDeniedTitle => _ru ? 'Доступ к галерее запрещён' : 'Gallery access denied';
+  String get mediaPickerDeniedBody => _ru ? 'Разрешите доступ в настройках или выберите файл напрямую.' : 'Allow access in settings or pick a file directly.';
+  String get mediaPickerPickFile => _ru ? 'Выбрать файл' : 'Pick File';
+  String get mediaPickerOpenSettings => _ru ? 'Настройки' : 'Open Settings';
 
   String get notifWarning => _ru
       ? 'Уведомления доставляются только пока приложение запущено в фоне. Чтобы не пропускать сообщения, держите ONYX свёрнутым.'
@@ -903,6 +976,135 @@ class AppLocalizations {
   String get generateAllConfirm => _ru
       ? 'Будет сгенерирован случайный контент. Текущие данные будут заменены.'
       : 'Random content will be generated, replacing existing data.';
+
+  // ── Send Favorites screen ─────────────────────────────────────────────────
+  String get sendFavoritesTitle => _ru ? 'Отправка избранного' : 'Send Favorites';
+  String get sendFavoritesShowQrToReceiver => _ru ? 'Показать QR получателю' : 'Show QR to Receiver';
+  String get sendFavoritesScanReceiver => _ru ? 'Сканировать QR получателя' : 'Scan Receiver QR';
+  String get sendFavoritesSending => _ru ? 'Идёт отправка избранного' : 'Sending Favorites';
+  String get sendFavoritesSelectTitle => _ru ? 'Выберите чаты для отправки' : 'Select chats to send';
+  String get sendFavoritesHintDesktop => _ru
+      ? 'Получатель должен нажать «Получить» первым. Затем сканируйте QR-код здесь.'
+      : 'The receiver must press "Receive" first. Then scan the QR code shown here.';
+  String get sendFavoritesHintMobile => _ru
+      ? 'Получатель должен нажать «Получить» первым и показать QR-код.'
+      : 'The receiver must press "Receive" first and show the QR code.';
+  String allChatsCount(int n) => _ru ? 'Все чаты ($n)' : 'All chats ($n)';
+  String get sendFavoritesNoFavs => _ru ? 'Нет избранных чатов.' : 'No favourite chats yet.';
+  String get sendFavoritesSelectAtLeastOne => _ru ? 'Выберите хотя бы один чат' : 'Select at least one chat';
+  String chatsSelected(int n) {
+    if (!_ru) return '$n chat${n == 1 ? '' : 's'} selected';
+    final mod10 = n % 10, mod100 = n % 100;
+    final word = (mod10 == 1 && mod100 != 11)
+        ? 'чат выбран'
+        : (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20))
+            ? 'чата выбрано'
+            : 'чатов выбрано';
+    return '$n $word';
+  }
+  String get sendFavoritesShowQrBtn => _ru ? 'Показать QR' : 'Show QR';
+  String get sendFavoritesScanQrBtn => _ru ? 'Сканировать QR' : 'Scan QR';
+
+  // ── Receive Favorites screen ──────────────────────────────────────────────
+  String get receiveFavoritesTitle => _ru ? 'Получение избранного' : 'Receive Favorites';
+  String get receiveFavoritesScanSender => _ru ? 'Сканировать QR отправителя' : 'Scan Sender QR';
+  String get receiveFavoritesScanOnSender => _ru ? 'Сканируйте QR на устройстве отправителя' : 'Scan on sender device';
+  String get receiveFavoritesInstruction => _ru
+      ? 'Откройте Избранное → Синхронизация → Отправить, затем сканируйте этот код'
+      : 'Open Favorites on the sender, tap Sync → Send, then scan this code';
+  String get receiveFavoritesE2E => _ru
+      ? 'Сквозное шифрование · только локальная сеть'
+      : 'End-to-end encrypted · local network only';
+  String get receiveFavoritesScanHint => _ru
+      ? 'Наведите камеру на QR-код\nна устройстве отправителя'
+      : 'Point the camera at the QR code shown on the sender device';
+  String get receiveFavoritesScanEncrypted => _ru
+      ? 'Передача зашифрована · только локальная сеть'
+      : 'Transfer is encrypted · local network only';
+  String get receiveFavoritesWaiting => _ru
+      ? 'Ожидание сканирования QR-кода отправителем…'
+      : 'Waiting for sender to scan QR code…';
+  String get receiveFavoritesComplete => _ru ? 'Передача завершена.' : 'Transfer complete.';
+  String get receiveFavoritesConnecting => _ru ? 'Подключение к отправителю…' : 'Connecting to sender…';
+  String get receiveFavoritesConnected => _ru ? 'Подключено! Ожидание файлов…' : 'Connected! Waiting for files…';
+  String get cancelTransfer => _ru ? 'Прервать передачу' : 'Cancel transfer';
+
+  // ── Account Graph settings ────────────────────────────────────────────────
+  String get accountGraph => _ru ? 'График аккаунта' : 'Account Graph';
+  String get accountGraphSubtitleDesktopOn => _ru
+      ? 'Показывает граф чатов, групп и каналов, когда чат не открыт'
+      : 'Shows a graph of your chats, groups and channels when no chat is open';
+  String get accountGraphSubtitleMobileOn => _ru
+      ? 'Проведите влево от правого края во вкладке Чаты, чтобы открыть граф'
+      : 'Swipe left from the right edge in Chats to open the graph';
+  String get accountGraphSubtitleDesktopOff => _ru
+      ? 'Показывает подсказку, когда чат не открыт'
+      : 'Shows a hint when no chat is open';
+  String get accountGraphSubtitleMobileOff => _ru ? 'График аккаунта отключён' : 'Account Graph is disabled';
+  String get orbitSpeed => _ru ? 'Скорость орбиты' : 'Orbit Speed';
+  String secOrbit(int s) => _ru ? '$s сек/орбита' : '$s sec/orbit';
+  String minOrbit(int m) => _ru ? '$m мин/орбита' : '$m min/orbit';
+  String get animateGraph => _ru ? 'Анимация' : 'Animate';
+  String get animateGraphOn => _ru ? 'Орбиты вращаются в реальном времени' : 'Orbits rotate in real time';
+  String get animateGraphOff => _ru ? 'Граф заморожен / статичен' : 'Graph is frozen / static';
+  String get preserveView => _ru ? 'Сохранять вид' : 'Preserve View';
+  String get preserveViewOn => _ru ? 'Сохраняет масштаб и позицию при выходе из чата' : 'Keeps zoom & position when leaving a chat';
+  String get preserveViewOff => _ru ? 'Сбрасывает в центр при возврате' : 'Resets to center when returning';
+
+  // ── Audio settings ────────────────────────────────────────────────────────
+  String get audioTitle => _ru ? 'Аудио' : 'Audio';
+  String get audioSubtitle => _ru ? 'Выбор микрофона и колонок' : 'Microphone and speaker device selection';
+  String get audioMicInput => _ru ? 'Микрофон (вход)' : 'Microphone (input)';
+  String get audioSpeakerOutput => _ru ? 'Колонки (выход)' : 'Speaker (output)';
+  String get audioSystemDefault => _ru ? 'Системный по умолчанию' : 'System default';
+  String get audioChangesNote => _ru
+      ? 'Изменения вступят в силу при следующем подключении к голосовому каналу.'
+      : 'Changes take effect on the next voice channel join.';
+
+  // ── NearLink ──────────────────────────────────────────────────────────────
+  String get nearlinkReceive => _ru ? 'Получить с устройства' : 'Receive from device';
+  String get nearlinkReceiveSubtitle => _ru ? 'Покажите QR-код — отправитель его сканирует' : 'Show a QR code — the sender scans it';
+  String get nearlinkSend => _ru ? 'Отправить на устройство' : 'Send to device';
+  String get nearlinkSendSubtitle => _ru ? 'Сканируйте QR-код на устройстве получателя' : 'Scan the QR code shown on the receiver';
+
+  // ── Message context menu ──────────────────────────────────────────────────
+  String get react => _ru ? 'Реакция' : 'React';
+  String get pin => _ru ? 'Закрепить' : 'Pin';
+  String get unpin => _ru ? 'Открепить' : 'Unpin';
+  String get copyImage => _ru ? 'Копировать изображение' : 'Copy Image';
+  String get forward => _ru ? 'Переслать' : 'Forward';
+  String get showInFileSystem => _ru ? 'Показать в проводнике' : 'Show in file system';
+  String get saveNotSupportedOnWeb => _ru ? 'Сохранение недоступно в веб-версии' : 'Save not supported on web';
+  String get imageNotLoadedYet => _ru ? 'Изображение ещё не загружено' : 'Image not loaded yet';
+  String get voiceNotLoadedYet => _ru ? 'Голосовое сообщение ещё не загружено' : 'Voice not loaded yet';
+  String get videoNotLoadedYet => _ru ? 'Видео ещё не загружено' : 'Video not loaded yet';
+  String get fileNotLoadedYet => _ru ? 'Файл ещё не загружен' : 'File not loaded yet';
+  String get fileNotLoadedOpenFirst => _ru ? 'Файл ещё не загружен — сначала откройте его' : 'File not loaded yet — open it first';
+  String editTimerLabel(int s) => _ru ? 'Изменить  ·  ${s}с' : 'Edit  ·  ${s}s'; // ignore: unnecessary_brace_in_string_interps
+  String deleteTimerLabel(int s) => _ru ? 'Удалить  ·  ${s}с' : 'Delete  ·  ${s}s'; // ignore: unnecessary_brace_in_string_interps
+
+  // ── Favorites tab ─────────────────────────────────────────────────────────
+  String get newChat => _ru ? 'Новый чат' : 'New chat';
+  String get newChatSubtitle => _ru ? 'Создать новый избранный чат' : 'Create a new favorite chat';
+  String get newFolder => _ru ? 'Новая папка' : 'New folder';
+  String get newFolderSubtitle => _ru ? 'Группировать чаты в папку' : 'Group chats into a folder';
+
+  // ── Emoji picker ──────────────────────────────────────────────────────────
+  String get searchEmoji => _ru ? 'Поиск эмодзи…' : 'Search emoji…';
+
+  // ── LAN favorites sync ────────────────────────────────────────────────────
+  String get syncCompleted => _ru ? 'Синхронизация завершена' : 'Sync completed';
+  String get syncCompletedWithErrors => _ru ? 'Синхронизация завершена с ошибками' : 'Sync completed with errors';
+  String get receivingFiles => _ru ? 'Получение файлов...' : 'Receiving files...';
+  String syncFromUser(String sender) => _ru ? 'от $sender' : 'from $sender';
+  String syncFileCount(int n) {
+    if (!_ru) return '$n file${n == 1 ? '' : 's'}';
+    final mod10 = n % 10, mod100 = n % 100;
+    if (mod100 >= 11 && mod100 <= 14) return '$n файлов';
+    if (mod10 == 1) return '$n файл';
+    if (mod10 >= 2 && mod10 <= 4) return '$n файла';
+    return '$n файлов';
+  }
 }
 
 class _AppLocalizationsDelegate
