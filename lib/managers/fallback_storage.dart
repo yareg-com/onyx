@@ -32,6 +32,11 @@ class FallbackStorage {
 
   final _aesGcm = AesGcm.with256bits();
 
+  // Serialises concurrent _saveToDisk() calls so they don't race on the
+  // temp file (which previously caused "rename: No such file" errors).
+  Future<void> _saveChain = Future.value();
+  int _tmpCounter = 0;
+
   // ── File names ─────────────────────────────────────────────────────────────
 
   String get _encFileName  => _id == 'main' ? '.onyx_storage.enc'
@@ -213,6 +218,10 @@ class FallbackStorage {
   /// Returns true if the PIN matches the one used to unlock this session.
   bool verifyPin(String pin) => _unlockedPin != null && _unlockedPin == pin;
 
+  /// PIN used to unlock the current session, if any. Needed to stash the PIN
+  /// behind biometrics (the v3 file itself no longer stores the PIN).
+  String? get currentPin => _unlockedPin;
+
   /// Create a new v3 partition encrypted with [pin] (used for decoy setup).
   Future<void> createWithPin(String pin) async {
     final dir = await getApplicationDocumentsDirectory();
@@ -345,7 +354,16 @@ class FallbackStorage {
         .cast<String, String>();
   }
 
-  Future<void> _saveToDisk() async {
+  // Serialise saves: each call chains onto the previous so two writes never
+  // race on the temp file or the destination.
+  Future<void> _saveToDisk() {
+    final next = _saveChain.then((_) => _saveToDiskNow());
+    // Swallow errors on the chain so one failure doesn't poison later saves.
+    _saveChain = next.catchError((_) {});
+    return next;
+  }
+
+  Future<void> _saveToDiskNow() async {
     if (_storageFile == null || _aesKey == null) return;
     try {
       final plain      = utf8.encode(jsonEncode(_memoryCache));
@@ -361,9 +379,27 @@ class FallbackStorage {
       } else {
         payload['v'] = 2;
       }
-      final tmp = File('${_storageFile!.path}.tmp');
-      await tmp.writeAsString(jsonEncode(payload));
-      await tmp.rename(_storageFile!.path);
+      final data = jsonEncode(payload);
+
+      // Make sure the destination directory exists (it can be missing on a
+      // fresh profile or if ~/Documents was never created).
+      final parent = _storageFile!.parent;
+      if (!await parent.exists()) await parent.create(recursive: true);
+
+      // Unique temp name per write avoids collisions between concurrent saves.
+      final tmp = File(
+          '${_storageFile!.path}.${pid}_${_tmpCounter++}.tmp');
+      await tmp.writeAsString(data, flush: true);
+      try {
+        await tmp.rename(_storageFile!.path);
+      } catch (_) {
+        // Rename can fail (race, cross-volume, or vanished tmp). Fall back to
+        // writing the destination directly so data is never lost.
+        await _storageFile!.writeAsString(data, flush: true);
+        if (await tmp.exists()) {
+          try { await tmp.delete(); } catch (_) {}
+        }
+      }
     } catch (e) {
       debugPrint('[FallbackStorage:$_id] save failed: $e');
     }

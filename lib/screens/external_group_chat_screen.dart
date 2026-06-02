@@ -236,20 +236,22 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
   }
 
   String? _messageKeyAtGlobal(Offset globalPosition) {
+    String? bestKey;
+    double bestCenterDist = double.infinity;
     for (final uniqueKey in _dragSelectionOrder) {
       final context = _messageItemKeys[uniqueKey]?.currentContext;
       if (context == null) continue;
       final box = context.findRenderObject() as RenderBox?;
       if (box == null || !box.hasSize) continue;
       final local = box.globalToLocal(globalPosition);
-      if (local.dx >= 0 &&
-          local.dy >= 0 &&
-          local.dx <= box.size.width &&
-          local.dy <= box.size.height) {
-        return uniqueKey;
+      if (local.dy < 0 || local.dy > box.size.height) continue;
+      final dist = (local.dy - box.size.height / 2).abs();
+      if (dist < bestCenterDist) {
+        bestCenterDist = dist;
+        bestKey = uniqueKey;
       }
     }
-    return null;
+    return bestKey;
   }
 
   void _updateDragAutoScroll() {
@@ -296,10 +298,13 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
     final newOffset =
         (_scroll.offset + speed).clamp(0.0, _scroll.position.maxScrollExtent);
     _scroll.jumpTo(newOffset);
-    final hoveredKey = _messageKeyAtGlobal(_lastDragPointerGlobal);
-    if (hoveredKey != null && hoveredKey != _dragSelectionCurrentKey) {
-      _selectExtMessageRangeTo(hoveredKey);
-    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_isDragSelectingMessages) return;
+      final hoveredKey = _messageKeyAtGlobal(_lastDragPointerGlobal);
+      if (hoveredKey != null && hoveredKey != _dragSelectionCurrentKey) {
+        _selectExtMessageRangeTo(hoveredKey);
+      }
+    });
   }
 
   void _stopDragAutoScroll() {
@@ -3364,7 +3369,7 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
                   colorScheme.surfaceContainerHighest,
                   brightness,
                 );
-                final isMobile = !Platform.isWindows && !Platform.isMacOS && !Platform.isLinux;
+                final isMobile = !Platform.isWindows && !Platform.isLinux;
                 final useGlass = isMobile && SettingsManager.liquidGlassOnInput.value;
                 final bar = ChatInputBar(
                   controller: _textCtrl,
@@ -4375,6 +4380,12 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
                             _suppressAutoRefocus = true;
                             _focusNode.unfocus();
                           },
+                          onPointerUp: (_) {
+                            if (_isDragSelectingMessages) _endExtDragSelection();
+                          },
+                          onPointerCancel: (_) {
+                            if (_isDragSelectingMessages) _endExtDragSelection();
+                          },
                           child: ListView.builder(
                             controller: _scroll,
                             reverse: true,
@@ -4577,8 +4588,8 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
                                     onTap: () =>
                                         _toggleExtMsgSelection(msg, uniqueKey),
                                     child: Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 6),
+                                      padding: const EdgeInsets.only(
+                                          right: 8),
                                       child: AnimatedContainer(
                                         duration:
                                             const Duration(milliseconds: 150),
@@ -4669,11 +4680,8 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
                                             horizontal: 12, vertical: 4),
                                         child: Row(
                                           children: [
-                                            if (sel.active && !shouldAlignRight)
-                                              extCheckmark,
+                                            if (sel.active) extCheckmark,
                                             Expanded(child: contentChild!),
-                                            if (sel.active && shouldAlignRight)
-                                              extCheckmark,
                                           ],
                                         ),
                                       ),
@@ -4751,7 +4759,7 @@ class _ExternalGroupChatScreenState extends State<ExternalGroupChatScreen>
                                     final opacity = SettingsManager.elementOpacity.value;
                                     final width = SettingsManager.inputBarMaxWidth.value;
                                     final brightness = SettingsManager.elementBrightness.value;
-                                    final isMobile = !Platform.isWindows && !Platform.isMacOS && !Platform.isLinux;
+                                    final isMobile = !Platform.isWindows && !Platform.isLinux;
                                     final useGlass = isMobile && SettingsManager.liquidGlassOnInput.value;
                                     final baseColor = SettingsManager.getElementColor(
                                       colorScheme.surfaceContainerHighest,

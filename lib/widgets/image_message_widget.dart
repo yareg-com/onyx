@@ -16,6 +16,17 @@ import 'chat_images_scope.dart';
 import '../utils/image_size_cache.dart';
 import '../utils/image_file_cache.dart';
 
+// Singleton future so all widgets share one async init instead of each awaiting separately.
+Future<String>? _imageDirFuture;
+Future<String> _getImageDirPath() {
+  return _imageDirFuture ??= () async {
+    final appSupport = await getApplicationSupportDirectory();
+    final dir = Directory('${appSupport.path}/image_cache');
+    await dir.create(recursive: true);
+    return dir.path;
+  }();
+}
+
 class ImageMessageWidget extends StatefulWidget {
   final String filename; 
   final String? owner;
@@ -90,9 +101,7 @@ class _ImageMessageWidgetState extends State<ImageMessageWidget> {
     try {
       debugPrint('[ImageWidget] Loading image: "${widget.filename}" (isOutgoing: ${widget.isOutgoing})');
 
-      final appSupport = await getApplicationSupportDirectory();
-      final cacheDir = Directory('${appSupport.path}/image_cache');
-      await cacheDir.create(recursive: true);
+      final cacheDirPath = await _getImageDirPath();
 
       File? cachedFile;
 
@@ -117,7 +126,7 @@ class _ImageMessageWidgetState extends State<ImageMessageWidget> {
         var url = widget.filename;
         final safeName = _sanitizeFilename(Uri.parse(url).pathSegments.last);
         final ext = _guessExtension(url) ?? '.jpg';
-        cachedFile = File('${cacheDir.path}/$safeName$ext');
+        cachedFile = File('${cacheDirPath}/$safeName$ext');
 
         if (!(await cachedFile.exists())) {
           
@@ -145,7 +154,7 @@ class _ImageMessageWidgetState extends State<ImageMessageWidget> {
         }
       } else {
         
-        final cachedPath = '${cacheDir.path}/${widget.filename}';
+        final cachedPath = '${cacheDirPath}/${widget.filename}';
         cachedFile = File(cachedPath);
         if (!(await cachedFile.exists())) {
           final root = rootScreenKey.currentState;

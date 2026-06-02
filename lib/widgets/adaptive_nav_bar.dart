@@ -1,4 +1,5 @@
 // lib/widgets/adaptive_nav_bar.dart
+import 'dart:io';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -40,7 +41,9 @@ class AdaptiveNavBar extends StatelessWidget {
     return ValueListenableBuilder<bool>(
       valueListenable: SettingsManager.liquidGlassOnNavBar,
       builder: (context, onNavBar, _) {
-        if (isDesktop || !onNavBar) return _buildStandard(context);
+        // Liquid glass на Android, iOS и macOS; на Windows/Linux — стандартный навбар.
+        final glassAllowed = !Platform.isWindows && !Platform.isLinux;
+        if (!glassAllowed || !onNavBar) return _buildStandard(context);
         return _buildLiquid(context);
       },
     );
@@ -166,9 +169,7 @@ class AdaptiveNavBar extends StatelessWidget {
           LiquidGlassQuality.medium  => GlassQuality.minimal,
           LiquidGlassQuality.quality => GlassQuality.premium,
         };
-        final glassQuality = (isDesktop && rawQuality == GlassQuality.premium)
-            ? GlassQuality.standard
-            : rawQuality;
+        final glassQuality = rawQuality;
 
         final isDark = Theme.of(context).brightness == Brightness.dark;
         final tintColor = isDark

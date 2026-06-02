@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/font_family.dart';
 import '../enums/nav_bar_style.dart';
 import '../enums/liquid_glass_quality.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'secure_store.dart';
 import 'fallback_storage.dart';
 
@@ -101,6 +102,19 @@ class SettingsManager {
   static const _pinEnabledKey = 'pin_lock_enabled';
   static const _pinCodeSecureKey = 'pin_lock_code';
   static const _biometricEnabledKey = 'biometric_lock_enabled';
+  // PIN stashed in the OS keychain so biometrics can unlock the v3 (PIN-derived)
+  // store on desktop. Kept in flutter_secure_storage directly — NOT in SecureStore,
+  // which on desktop lives inside the very file we need the PIN to decrypt.
+  //
+  // macOS only: useDataProtectionKeyChain:false routes to the legacy login
+  // keychain, which works for unsigned/dev builds (the data-protection keychain
+  // needs the keychain-access-groups entitlement → otherwise errSecMissingEntitlement
+  // / -34018). This mOptions is ignored on iOS/Android, so their behaviour is
+  // unchanged.
+  static const _biometricPinKey = 'biometric_unlock_pin';
+  static const FlutterSecureStorage _bioKeychain = FlutterSecureStorage(
+    mOptions: MacOsOptions(useDataProtectionKeyChain: false),
+  );
   static const _appLocaleKey = 'app_locale';
   static const _launchAtStartupKey = 'launch_at_startup';
   static const _audioInputDeviceKey = 'audio_input_device_id';
@@ -318,7 +332,7 @@ class SettingsManager {
     final liquidBlur        = prefs.getDouble(_liquidGlassBlurKey)        ?? 7.0;
     final liquidTint        = prefs.getDouble(_liquidGlassTintKey)        ?? 0.10;
     final liquidSaturation  = prefs.getDouble(_liquidGlassSaturationKey)  ?? 1.0;
-    final liquidOnCards          = prefs.getBool(_liquidGlassOnCardsKey)           ?? false;
+    final liquidOnCards          = prefs.getBool(_liquidGlassOnCardsKey)           ?? true;
     final liquidCardsBlur        = prefs.getDouble(_liquidGlassCardsBlurKey)        ?? 7.0;
     final liquidCardsTint        = prefs.getDouble(_liquidGlassCardsTintKey)        ?? 0.10;
     final liquidCardsSaturation  = prefs.getDouble(_liquidGlassCardsSaturationKey)  ?? 1.0;
@@ -683,6 +697,43 @@ class SettingsManager {
     final prefs = await _getPrefs();
     await prefs.setString(_navBarStyleKey, val.name);
     navBarStyle.value = val;
+  }
+
+  // ── App theme (non-sensitive UI preference) ────────────────────────────────
+  // Stored in SharedPreferences alongside the other appearance settings so it
+  // persists reliably on desktop too. The old location was SecureStore, which on
+  // macOS/Windows/Linux routes through the encrypted FallbackStorage — that is
+  // locked behind the PIN at startup (and unavailable before unlock), so the
+  // theme silently reset to the default. We migrate the legacy value once.
+  static const _appThemeNameKey = 'app_theme_name';
+  static const _appThemeIsDarkKey = 'app_theme_is_dark';
+
+  static Future<({String? name, bool? isDark})> loadThemePreference() async {
+    final prefs = await _getPrefs();
+    String? name = prefs.getString(_appThemeNameKey);
+    bool? isDark =
+        prefs.containsKey(_appThemeIsDarkKey) ? prefs.getBool(_appThemeIsDarkKey) : null;
+
+    // One-time migration from the legacy SecureStore location.
+    if (name == null) {
+      try {
+        final legacyName = await SecureStore.read('app_theme_name');
+        if (legacyName != null) {
+          final legacyDark = await SecureStore.read('app_theme_is_dark');
+          name = legacyName;
+          isDark ??= legacyDark == null ? null : legacyDark == 'true';
+          await prefs.setString(_appThemeNameKey, legacyName);
+          if (isDark != null) await prefs.setBool(_appThemeIsDarkKey, isDark);
+        }
+      } catch (_) {}
+    }
+    return (name: name, isDark: isDark);
+  }
+
+  static Future<void> saveThemePreference(String name, bool isDark) async {
+    final prefs = await _getPrefs();
+    await prefs.setString(_appThemeNameKey, name);
+    await prefs.setBool(_appThemeIsDarkKey, isDark);
   }
 
   static Future<void> setLiquidGlassQuality(LiquidGlassQuality val) async {
@@ -1067,11 +1118,18 @@ class SettingsManager {
     pinEnabled.value = val;
   }
 
+  static bool get _isDesktop =>
+      !kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
+
   static Future<void> setPin(String pin) async {
     await SecureStore.write(_pinCodeSecureKey, pin);
     // On desktop: migrate storage to v3 (PIN-derived encryption).
-    if (!kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
+    if (_isDesktop) {
       await FallbackStorage.main.migrateToV3(pin);
+    }
+    // Keep the biometric copy of the PIN in sync if biometrics are enabled.
+    if (biometricEnabled.value) {
+      await storeBiometricPin(pin);
     }
   }
 
@@ -1081,8 +1139,9 @@ class SettingsManager {
 
   static Future<void> clearPin() async {
     await SecureStore.delete(_pinCodeSecureKey);
+    await clearBiometricPin();
     // On desktop: migrate storage back to v2 (machine-derived encryption).
-    if (!kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
+    if (_isDesktop) {
       await FallbackStorage.main.migrateToV2();
     }
   }
@@ -1091,6 +1150,41 @@ class SettingsManager {
     final prefs = await _getPrefs();
     await prefs.setBool(_biometricEnabledKey, val);
     biometricEnabled.value = val;
+    if (val) {
+      // Stash the current PIN so biometrics can decrypt the store on desktop.
+      // On desktop the live PIN is FallbackStorage's _unlockedPin; on mobile
+      // fall back to the keychain-stored PIN.
+      final pin = FallbackStorage.main.currentPin ?? await getPin();
+      if (pin != null && pin.isNotEmpty) await storeBiometricPin(pin);
+    } else {
+      await clearBiometricPin();
+    }
+  }
+
+  // ── Biometric PIN stash (OS keychain, gated by the local_auth prompt) ───────
+
+  static Future<void> storeBiometricPin(String pin) async {
+    try {
+      await _bioKeychain.write(key: _biometricPinKey, value: pin);
+      debugPrint('[biometric] storeBiometricPin: ok');
+    } catch (e) {
+      debugPrint('[biometric] storeBiometricPin FAILED: $e');
+    }
+  }
+
+  static Future<String?> getBiometricPin() async {
+    try {
+      return await _bioKeychain.read(key: _biometricPinKey);
+    } catch (e) {
+      debugPrint('[biometric] getBiometricPin FAILED: $e');
+      return null;
+    }
+  }
+
+  static Future<void> clearBiometricPin() async {
+    try {
+      await _bioKeychain.delete(key: _biometricPinKey);
+    } catch (_) {}
   }
 
   static Future<void> setAppLocale(Locale locale) async {

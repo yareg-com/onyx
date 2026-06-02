@@ -19,12 +19,13 @@ class AdaptiveGlassCard extends StatelessWidget {
   final EdgeInsetsGeometry padding;
   final VoidCallback? onTap;
 
-  static bool get _isMobile =>
-      !Platform.isWindows && !Platform.isMacOS && !Platform.isLinux;
+  // Liquid glass только на Android и iOS; на десктопе (Windows/Linux/macOS) — стандартный рендер.
+  static bool get _glassAllowed =>
+      !Platform.isWindows && !Platform.isLinux && !Platform.isMacOS;
 
   @override
   Widget build(BuildContext context) {
-    if (!_isMobile) return _buildStandard(context);
+    if (!_glassAllowed) return _buildStandard(context);
     return ValueListenableBuilder<bool>(
       valueListenable: SettingsManager.liquidGlassOnCards,
       builder: (_, onCards, __) {

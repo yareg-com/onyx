@@ -32,5 +32,9 @@
     <string>Record voice messages and make voice calls</string>
     <key>NSCameraUsageDescription</key>
     <string>Video calls and camera access</string>
+    <key>NSFaceIDUsageDescription</key>
+    <string>Unlock ONYX with Touch ID / Face ID</string>
+    <key>FLTEnableImpeller</key>
+    <true/>
 </dict>
 </plist>

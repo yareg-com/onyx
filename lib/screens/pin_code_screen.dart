@@ -168,6 +168,11 @@ class _PinCodeScreenState extends State<PinCodeScreen>
         if (FallbackStorage.main.isLocked) {
           // v3, locked at startup: PIN is the decryption key.
           if (await FallbackStorage.main.unlockWithPin(_pin)) {
+            // Backfill the biometric PIN stash for users who enabled biometrics
+            // before it was wired up (or after a keychain reset).
+            if (SettingsManager.biometricEnabled.value) {
+              await SettingsManager.storeBiometricPin(_pin);
+            }
             widget.onSuccess?.call();
             return;
           }

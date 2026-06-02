@@ -1,12 +1,12 @@
-// lib/utils/nearlink_bubble_controller.dart
+// lib/utils/wardlink_bubble_controller.dart
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import '../services/lan_fav_sync_service.dart';
 
-enum NearLinkBubblePhase { idle, transferring, done }
+enum WardLinkBubblePhase { idle, transferring, done }
 
-class NearLinkBubbleController extends ChangeNotifier {
-  NearLinkBubblePhase _phase = NearLinkBubblePhase.idle;
+class WardLinkBubbleController extends ChangeNotifier {
+  WardLinkBubblePhase _phase = WardLinkBubblePhase.idle;
   bool _minimized = false;
 
   int current = 0;
@@ -24,8 +24,8 @@ class NearLinkBubbleController extends ChangeNotifier {
   // Desktop sender handshake session — held so dispose() doesn't close it.
   LanFavSyncSenderHandshakeSession? _senderHandshakeSession;
 
-  NearLinkBubblePhase get phase => _phase;
-  bool get isActive => _phase != NearLinkBubblePhase.idle;
+  WardLinkBubblePhase get phase => _phase;
+  bool get isActive => _phase != WardLinkBubblePhase.idle;
   bool get isMinimized => _minimized;
 
   // ── Called by receive screen after server is ready ─────────────────────────
@@ -34,7 +34,7 @@ class NearLinkBubbleController extends ChangeNotifier {
     _receiverSession = session;
     receiveQrJson = session.qrJson;
     isSend = false;
-    _phase = NearLinkBubblePhase.transferring;
+    _phase = WardLinkBubblePhase.transferring;
     _minimized = false;
     current = 0;
     total = 0;
@@ -46,7 +46,7 @@ class NearLinkBubbleController extends ChangeNotifier {
 
   void beginSend() {
     isSend = true;
-    _phase = NearLinkBubblePhase.transferring;
+    _phase = WardLinkBubblePhase.transferring;
     _minimized = false;
     current = 0;
     total = 0;
@@ -101,7 +101,7 @@ class NearLinkBubbleController extends ChangeNotifier {
   // ── Done ───────────────────────────────────────────────────────────────────
 
   void _markDone() {
-    _phase = NearLinkBubblePhase.done;
+    _phase = WardLinkBubblePhase.done;
     notifyListeners();
     if (_minimized) {
       Future.delayed(const Duration(seconds: 2), reset);
@@ -119,7 +119,7 @@ class NearLinkBubbleController extends ChangeNotifier {
     _senderHandshakeSession = null;
     _receiverSession?.close();
     _receiverSession = null;
-    _phase = NearLinkBubblePhase.idle;
+    _phase = WardLinkBubblePhase.idle;
     _minimized = false;
     current = 0;
     total = 0;
@@ -136,7 +136,7 @@ class NearLinkBubbleController extends ChangeNotifier {
     _sendSub = null;
     _senderHandshakeSession?.close();
     _senderHandshakeSession = null;
-    _phase = NearLinkBubblePhase.idle;
+    _phase = WardLinkBubblePhase.idle;
     _minimized = false;
     current = 0;
     total = 0;
@@ -149,4 +149,4 @@ class NearLinkBubbleController extends ChangeNotifier {
   }
 }
 
-final nearLinkBubbleController = NearLinkBubbleController();
+final wardLinkBubbleController = WardLinkBubbleController();

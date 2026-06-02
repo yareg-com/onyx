@@ -529,20 +529,22 @@ class ChatScreenState extends State<ChatScreen>
   }
 
   String? _messageKeyAtGlobal(Offset globalPosition) {
+    String? bestKey;
+    double bestCenterDist = double.infinity;
     for (final uniqueKey in _dragSelectionOrder) {
       final context = _messageItemKeys[uniqueKey]?.currentContext;
       if (context == null) continue;
       final box = context.findRenderObject() as RenderBox?;
       if (box == null || !box.hasSize) continue;
       final local = box.globalToLocal(globalPosition);
-      if (local.dx >= 0 &&
-          local.dy >= 0 &&
-          local.dx <= box.size.width &&
-          local.dy <= box.size.height) {
-        return uniqueKey;
+      if (local.dy < 0 || local.dy > box.size.height) continue;
+      final dist = (local.dy - box.size.height / 2).abs();
+      if (dist < bestCenterDist) {
+        bestCenterDist = dist;
+        bestKey = uniqueKey;
       }
     }
-    return null;
+    return bestKey;
   }
 
   void _updateDragAutoScroll() {
@@ -589,10 +591,13 @@ class ChatScreenState extends State<ChatScreen>
     final newOffset =
         (_scroll.offset + speed).clamp(0.0, _scroll.position.maxScrollExtent);
     _scroll.jumpTo(newOffset);
-    final hoveredKey = _messageKeyAtGlobal(_lastDragPointerGlobal);
-    if (hoveredKey != null && hoveredKey != _dragSelectionCurrentKey) {
-      _selectMessageRangeTo(hoveredKey);
-    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_isDragSelectingMessages) return;
+      final hoveredKey = _messageKeyAtGlobal(_lastDragPointerGlobal);
+      if (hoveredKey != null && hoveredKey != _dragSelectionCurrentKey) {
+        _selectMessageRangeTo(hoveredKey);
+      }
+    });
   }
 
   void _stopDragAutoScroll() {
@@ -3173,6 +3178,12 @@ class ChatScreenState extends State<ChatScreen>
                                 _suppressAutoRefocus = true;
                                 _focusNode.unfocus();
                               },
+                              onPointerUp: (_) {
+                                if (_isDragSelectingMessages) _endMessageDragSelection();
+                              },
+                              onPointerCancel: (_) {
+                                if (_isDragSelectingMessages) _endMessageDragSelection();
+                              },
                               child: ListView.builder(
                                 controller: _scroll,
                                 reverse: true,
@@ -3313,8 +3324,8 @@ class ChatScreenState extends State<ChatScreen>
                                         final checkmark = AnimatedContainer(
                                           duration:
                                               const Duration(milliseconds: 150),
-                                          margin: const EdgeInsets.symmetric(
-                                              horizontal: 6),
+                                          margin: const EdgeInsets.only(
+                                              right: 8),
                                           width: 22,
                                           height: 22,
                                           decoration: BoxDecoration(
@@ -3417,9 +3428,7 @@ class ChatScreenState extends State<ChatScreen>
                                                         : MainAxisAlignment
                                                             .start,
                                                 children: [
-                                                  if (sel.active &&
-                                                      !shouldShowRight)
-                                                    checkmark,
+                                                  if (sel.active) checkmark,
                                                   Flexible(
                                                     child: SwipeableMessageWrapper(
                                                       disabled: sel.active,
@@ -3509,9 +3518,6 @@ class ChatScreenState extends State<ChatScreen>
                                                     ),
                                                     ),
                                                   ),
-                                                  if (sel.active &&
-                                                      shouldShowRight)
-                                                    checkmark,
                                                 ],
                                               ),
                                             ),
@@ -3916,10 +3922,10 @@ class ChatScreenState extends State<ChatScreen>
                                       .colorScheme
                                       .outlineVariant
                                       .withValues(alpha: 0.15);
-                                  final isMobile = !Platform.isWindows &&
-                                      !Platform.isMacOS &&
-                                      !Platform.isLinux;
-                                  final useGlass = isMobile &&
+                                  // Liquid glass на Android, iOS и macOS; на Windows/Linux — стандартный рендер.
+                                  final glassAllowed =
+                                      !Platform.isWindows && !Platform.isLinux;
+                                  final useGlass = glassAllowed &&
                                       SettingsManager.liquidGlassOnInput.value;
                                   final bar = ConstrainedBox(
                                     constraints: BoxConstraints(maxWidth: width),

@@ -89,6 +89,12 @@ dev_dependencies:
   flutter_lints: ^5.0.0
   flutter_launcher_icons: ^0.13.1
 
+# liquid_glass_widgets 0.11.0 требует meta ^1.17.0, но flutter_test из SDK
+# пиннит meta на 1.16.0. meta — это только аннотации, поэтому форсим 1.17.0,
+# чтобы оставить liquid_glass_widgets 0.11.0 с полными премиум-шейдерами.
+dependency_overrides:
+  meta: ^1.17.0
+
 
 
 flutter:

@@ -1,24 +1,24 @@
-// lib/widgets/nearlink_bubble.dart
+// lib/widgets/wardlink_bubble.dart
 //
 // Floats above all screens (same Stack level as VinylPlayerButton in
-// MaterialApp.builder). Visible only when a NearLink transfer is minimized.
+// MaterialApp.builder). Visible only when a WardLink transfer is minimized.
 // Draggable, tap = reopen dialog, auto-dismisses 2 s after transfer completes.
 
 import 'dart:math' show pi;
 import 'package:flutter/material.dart';
 import '../globals.dart' show navigatorKey;
-import '../utils/nearlink_bubble_controller.dart';
+import '../utils/wardlink_bubble_controller.dart';
 import '../screens/fav_sync_receive_screen.dart';
 import '../screens/fav_sync_send_screen.dart';
 
-class NearLinkBubble extends StatefulWidget {
-  const NearLinkBubble({super.key});
+class WardLinkBubble extends StatefulWidget {
+  const WardLinkBubble({super.key});
 
   @override
-  State<NearLinkBubble> createState() => _NearLinkBubbleState();
+  State<WardLinkBubble> createState() => _WardLinkBubbleState();
 }
 
-class _NearLinkBubbleState extends State<NearLinkBubble>
+class _WardLinkBubbleState extends State<WardLinkBubble>
     with TickerProviderStateMixin {
   // Continuous forward spin for the sync icon.
   late final AnimationController _spin;
@@ -37,7 +37,7 @@ class _NearLinkBubbleState extends State<NearLinkBubble>
       vsync: this,
       duration: const Duration(milliseconds: 900),
     )..repeat(reverse: true);
-    nearLinkBubbleController.addListener(_onChanged);
+    wardLinkBubbleController.addListener(_onChanged);
   }
 
   void _onChanged() {
@@ -47,15 +47,15 @@ class _NearLinkBubbleState extends State<NearLinkBubble>
 
   @override
   void dispose() {
-    nearLinkBubbleController.removeListener(_onChanged);
+    wardLinkBubbleController.removeListener(_onChanged);
     _spin.dispose();
     _pulse.dispose();
     super.dispose();
   }
 
   void _onTap() {
-    final ctrl = nearLinkBubbleController;
-    if (ctrl.phase == NearLinkBubblePhase.done) {
+    final ctrl = wardLinkBubbleController;
+    if (ctrl.phase == WardLinkBubblePhase.done) {
       ctrl.reset();
       return;
     }
@@ -80,15 +80,15 @@ class _NearLinkBubbleState extends State<NearLinkBubble>
 
   @override
   Widget build(BuildContext context) {
-    final ctrl = nearLinkBubbleController;
+    final ctrl = wardLinkBubbleController;
     if (!ctrl.isMinimized) return const SizedBox.shrink();
-    if (ctrl.total == 0 && ctrl.phase != NearLinkBubblePhase.done) return const SizedBox.shrink();
+    if (ctrl.total == 0 && ctrl.phase != WardLinkBubblePhase.done) return const SizedBox.shrink();
 
     final mq = MediaQuery.of(context);
     _pos ??= Offset(mq.size.width - 74, mq.viewPadding.top + 170);
 
     final cs = Theme.of(context).colorScheme;
-    final isDone = ctrl.phase == NearLinkBubblePhase.done;
+    final isDone = ctrl.phase == WardLinkBubblePhase.done;
 
     return Positioned(
       left: _pos!.dx,

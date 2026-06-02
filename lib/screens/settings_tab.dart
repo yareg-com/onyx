@@ -2353,7 +2353,8 @@ class _SettingsTabState extends State<SettingsTab>
                       _LiquidSliderConfig(label: 'Jelly Stretch Amount', description: 'Indicator expansion when dragging between tabs', listenable: SettingsManager.liquidGlassExpansion, min: 0, max: 28, divisions: 28, format: (v) => v.toStringAsFixed(0), onChanged: SettingsManager.setLiquidGlassExpansion),
                     ],
                   ),
-                  // ── Cards & List Items ────────────────────────
+                  // ── Cards & List Items (только мобилки; на десктопе скрыто) ──
+                  if (!Platform.isMacOS) ...[
                   const SizedBox(height: 12),
                   _buildLiquidElementSection(
                     context: context,
@@ -2374,6 +2375,7 @@ class _SettingsTabState extends State<SettingsTab>
                       _LiquidSliderConfig(label: 'Thickness', description: 'Glass depth — affects refraction and edge glow', listenable: SettingsManager.liquidGlassCardsThickness, min: 0, max: 60, divisions: 12, format: (v) => v.toStringAsFixed(0), onChanged: SettingsManager.setLiquidGlassCardsThickness),
                     ],
                   ),
+                  ],
                   // ── Input Bar ─────────────────────────────────
                   const SizedBox(height: 12),
                   _buildLiquidElementSection(
@@ -2488,7 +2490,7 @@ class _SettingsTabState extends State<SettingsTab>
           
           Center( 
             child: Text(
-              'open-beta 1.6',
+              'open-beta 1.6a',
               style: TextStyle(
                 fontSize: 12,
                 color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.55),

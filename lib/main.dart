@@ -33,11 +33,10 @@ import 'managers/blocklist_manager.dart';
 import 'managers/mute_manager.dart';
 import 'managers/lock_manager.dart';
 import 'managers/account_manager.dart';
-import 'managers/secure_store.dart';
 import 'managers/onyx_tray_manager.dart';
 import 'models/app_themes.dart';
 import 'widgets/debug_overlay_v2.dart';
-import 'widgets/nearlink_bubble.dart';
+import 'widgets/wardlink_bubble.dart';
 import 'widgets/vinyl_player_button.dart';
 import 'widgets/voice_channel_bar.dart';
 import 'voice/voice_channel_manager.dart';
@@ -653,10 +652,11 @@ class _ElegantMessengerState extends State<ElegantMessenger> with WindowListener
 
   Future<void> _loadThemePreferences() async {
     String? themeName;
-    String? isDark;
+    bool? isDark;
     try {
-      themeName = await SecureStore.read('app_theme_name');
-      isDark = await SecureStore.read('app_theme_is_dark');
+      final pref = await SettingsManager.loadThemePreference();
+      themeName = pref.name;
+      isDark = pref.isDark;
     } catch (e) {
       debugPrint('[main] Theme read failed: $e');
     }
@@ -680,15 +680,14 @@ class _ElegantMessengerState extends State<ElegantMessenger> with WindowListener
 
     setState(() {
       _currentTheme = theme;
-      
-      _isDarkMode = isDark == null ? true : isDark == 'true';
+
+      _isDarkMode = isDark ?? true;
     });
   }
 
   Future<void> _setTheme(AppTheme theme, bool isDark) async {
     try {
-      await SecureStore.write('app_theme_name', theme.name);
-      await SecureStore.write('app_theme_is_dark', isDark.toString());
+      await SettingsManager.saveThemePreference(theme.name, isDark);
     } catch (e) {
       debugPrint('[main] Theme write failed: $e');
     }
@@ -743,7 +742,7 @@ class _ElegantMessengerState extends State<ElegantMessenger> with WindowListener
                   child ?? const SizedBox.shrink(),
                   const CallOverlay(),
                   const VinylPlayerButton(),
-                  const NearLinkBubble(),
+                  const WardLinkBubble(),
                   const _GlobalVoiceBar(),
                 ],
               ),
@@ -798,15 +797,65 @@ class _PinGateWidgetState extends State<_PinGateWidget> {
   Future<void> _tryBiometric() async {
     try {
       final supported = await _localAuth.isDeviceSupported();
-      if (!supported) return;
+      final canCheck = await _localAuth.canCheckBiometrics;
+      appLog('[biometric] start: supported=$supported canCheck=$canCheck');
+      if (!supported) {
+        appLog('[biometric] abort: device not supported');
+        return;
+      }
+
+      // On desktop the account store is encrypted with the PIN (v3). Biometrics
+      // cannot derive that key, so after the biometric prompt we retrieve the
+      // PIN stashed in the OS keychain and use it to decrypt the store. Without
+      // a stashed PIN biometrics can't unlock — fall back to the PIN screen.
+      final isDesktop = !kIsWeb &&
+          (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
+      if (isDesktop) {
+        await FallbackStorage.main.initialize();
+        appLog('[biometric] desktop: isLocked=${FallbackStorage.main.isLocked}');
+        if (FallbackStorage.main.isLocked) {
+          final pin = await SettingsManager.getBiometricPin();
+          appLog('[biometric] stashed pin present=${pin != null && pin.isNotEmpty}');
+          if (pin == null || pin.isEmpty) {
+            appLog('[biometric] abort: no stashed PIN — unlock once with PIN first');
+            return;
+          }
+          final didAuth = await _localAuth.authenticate(
+            localizedReason: 'Unlock ONYX',
+            options: const AuthenticationOptions(biometricOnly: false),
+          );
+          appLog('[biometric] authenticate returned $didAuth');
+          if (!didAuth) return;
+          final unlocked = await FallbackStorage.main.unlockWithPin(pin);
+          appLog('[biometric] unlockWithPin -> $unlocked');
+          if (unlocked && mounted) {
+            _completeUnlock();
+          }
+          return;
+        }
+      }
+
       final didAuth = await _localAuth.authenticate(
         localizedReason: 'Unlock ONYX',
         options: const AuthenticationOptions(biometricOnly: false),
       );
-      if (didAuth && mounted) setState(() => _unlocked = true);
-    } catch (e) {
-      debugPrint('[biometric] auth error: $e');
+      appLog('[biometric] authenticate returned $didAuth');
+      if (didAuth && mounted) _completeUnlock();
+    } catch (e, st) {
+      appLog('[biometric] auth error: $e\n$st');
     }
+  }
+
+  /// Shared post-unlock work for both PIN and biometric paths: reset cached
+  /// media, mark the gate as unlocked, then reload the current account/chats.
+  /// RootScreen state is preserved by GlobalKey across lock/unlock, so without
+  /// the manual reload the account would not reappear after unlocking.
+  void _completeUnlock() {
+    MediaCache.instance.reset();
+    setState(() => _unlocked = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      rootScreenKey.currentState?.reloadAfterUnlock();
+    });
   }
 
   void _lockApp() {
@@ -827,15 +876,7 @@ class _PinGateWidgetState extends State<_PinGateWidget> {
   Widget build(BuildContext context) {
     if (!_unlocked) {
       return PinCodeScreen.verify(
-        onSuccess: () {
-          MediaCache.instance.reset();
-          setState(() => _unlocked = true);
-          // RootScreen state is preserved by GlobalKey across lock/unlock —
-          // trigger a manual reload so chats appear without switching tabs.
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            rootScreenKey.currentState?.reloadAfterUnlock();
-          });
-        },
+        onSuccess: _completeUnlock,
         onFakePin: _activateDecoy,
         onBiometric: SettingsManager.biometricEnabled.value ? _tryBiometric : null,
       );

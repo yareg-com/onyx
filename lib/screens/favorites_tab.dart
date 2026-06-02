@@ -865,7 +865,7 @@ class _FavoritesTabState extends State<FavoritesTab>
                   children: [
                     Icon(Icons.sync_rounded, size: 20, color: cs.onSurfaceVariant),
                     const SizedBox(width: 8),
-                    Text('NearLink',
+                    Text('WardLink',
                         style: TextStyle(
                             fontWeight: FontWeight.w600,
                             fontSize: 15,
@@ -881,8 +881,8 @@ class _FavoritesTabState extends State<FavoritesTab>
                   child: Icon(Icons.qr_code_rounded,
                       size: 20, color: cs.primary),
                 ),
-                title: Text(l.nearlinkReceive),
-                subtitle: Text(l.nearlinkReceiveSubtitle),
+                title: Text(l.wardlinkReceive),
+                subtitle: Text(l.wardlinkReceiveSubtitle),
                 onTap: () {
                   Navigator.of(ctx).pop();
                   showDialog<void>(
@@ -899,8 +899,8 @@ class _FavoritesTabState extends State<FavoritesTab>
                   child: Icon(Icons.qr_code_scanner_rounded,
                       size: 20, color: cs.secondary),
                 ),
-                title: Text(l.nearlinkSend),
-                subtitle: Text(l.nearlinkSendSubtitle),
+                title: Text(l.wardlinkSend),
+                subtitle: Text(l.wardlinkSendSubtitle),
                 onTap: () {
                   Navigator.of(ctx).pop();
                   showDialog<void>(

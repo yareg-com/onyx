@@ -20,7 +20,7 @@ import '../managers/settings_manager.dart';
 import '../models/fav_folder.dart';
 import '../models/favorite_chat.dart';
 import '../services/lan_fav_sync_service.dart';
-import '../utils/nearlink_bubble_controller.dart';
+import '../utils/wardlink_bubble_controller.dart';
 import '../widgets/adaptive_glass_card.dart';
 
 class FavSyncSendScreen extends StatefulWidget {
@@ -73,7 +73,7 @@ class _FavSyncSendScreenState extends State<FavSyncSendScreen> {
     super.initState();
     // If a send session is already active (user tapped bubble to reopen),
     // attach to the controller state instead of starting a fresh selection.
-    if (nearLinkBubbleController.isActive && nearLinkBubbleController.isSend) {
+    if (wardLinkBubbleController.isActive && wardLinkBubbleController.isSend) {
       _attachToController();
       return;
     }
@@ -91,22 +91,22 @@ class _FavSyncSendScreenState extends State<FavSyncSendScreen> {
 
   void _attachToController() {
     _attachedToController = true;
-    _transferring = nearLinkBubbleController.phase == NearLinkBubblePhase.transferring;
-    _done = nearLinkBubbleController.phase == NearLinkBubblePhase.done;
-    _current = nearLinkBubbleController.current;
-    _total = nearLinkBubbleController.total;
-    _statusText = nearLinkBubbleController.statusText;
-    nearLinkBubbleController.addListener(_onControllerUpdate);
+    _transferring = wardLinkBubbleController.phase == WardLinkBubblePhase.transferring;
+    _done = wardLinkBubbleController.phase == WardLinkBubblePhase.done;
+    _current = wardLinkBubbleController.current;
+    _total = wardLinkBubbleController.total;
+    _statusText = wardLinkBubbleController.statusText;
+    wardLinkBubbleController.addListener(_onControllerUpdate);
   }
 
   void _onControllerUpdate() {
     if (!mounted) return;
     setState(() {
-      _transferring = nearLinkBubbleController.phase == NearLinkBubblePhase.transferring;
-      _done = nearLinkBubbleController.phase == NearLinkBubblePhase.done;
-      _current = nearLinkBubbleController.current;
-      _total = nearLinkBubbleController.total;
-      _statusText = nearLinkBubbleController.statusText;
+      _transferring = wardLinkBubbleController.phase == WardLinkBubblePhase.transferring;
+      _done = wardLinkBubbleController.phase == WardLinkBubblePhase.done;
+      _current = wardLinkBubbleController.current;
+      _total = wardLinkBubbleController.total;
+      _statusText = wardLinkBubbleController.statusText;
     });
   }
 
@@ -114,14 +114,14 @@ class _FavSyncSendScreenState extends State<FavSyncSendScreen> {
     _minimizing = true;
     // Transfer ownership to controller so dispose() won't close/cancel them.
     if (_sub != null) {
-      nearLinkBubbleController.takeSendSub(_sub!);
+      wardLinkBubbleController.takeSendSub(_sub!);
       _sub = null;
     }
     if (_handshakeSession != null) {
-      nearLinkBubbleController.takeSenderHandshakeSession(_handshakeSession!);
+      wardLinkBubbleController.takeSenderHandshakeSession(_handshakeSession!);
       _handshakeSession = null;
     }
-    nearLinkBubbleController.minimize();
+    wardLinkBubbleController.minimize();
     Navigator.of(context).pop();
   }
 
@@ -131,7 +131,7 @@ class _FavSyncSendScreenState extends State<FavSyncSendScreen> {
     if (mounted) Navigator.of(context).pop();
     sub?.cancel();
     Future.delayed(const Duration(milliseconds: 300), () {
-      nearLinkBubbleController.cancelTransfer();
+      wardLinkBubbleController.cancelTransfer();
     });
   }
 
@@ -139,13 +139,13 @@ class _FavSyncSendScreenState extends State<FavSyncSendScreen> {
   void dispose() {
     _scanCtrl?.dispose();
     if (_attachedToController) {
-      nearLinkBubbleController.removeListener(_onControllerUpdate);
+      wardLinkBubbleController.removeListener(_onControllerUpdate);
     } else if (_minimizing) {
       // _sub already handed to controller above — don't cancel.
     } else {
       _sub?.cancel();
-      if (nearLinkBubbleController.isActive && !nearLinkBubbleController.isMinimized) {
-        nearLinkBubbleController.reset();
+      if (wardLinkBubbleController.isActive && !wardLinkBubbleController.isMinimized) {
+        wardLinkBubbleController.reset();
       }
     }
     // _handshakeSession is null when minimizing (handed to controller above).
@@ -175,7 +175,7 @@ class _FavSyncSendScreenState extends State<FavSyncSendScreen> {
       _sub = session.events.listen(
         (event) {
           if (mounted && _scanning) {
-            nearLinkBubbleController.beginSend();
+            wardLinkBubbleController.beginSend();
             setState(() {
               _scanning = false;
               _transferring = true;
@@ -231,7 +231,7 @@ class _FavSyncSendScreenState extends State<FavSyncSendScreen> {
   }
 
   void _startTransfer(String qrJson) {
-    nearLinkBubbleController.beginSend();
+    wardLinkBubbleController.beginSend();
     setState(() {
       _scanning = false;
       _transferring = true;
@@ -268,7 +268,7 @@ class _FavSyncSendScreenState extends State<FavSyncSendScreen> {
   void _onEvent(LanFavSyncEvent event) {
     // Forward to controller before mounted check so the bubble stays updated
     // even after the dialog has been minimized and this State unmounted.
-    nearLinkBubbleController.processEvent(event);
+    wardLinkBubbleController.processEvent(event);
 
     if (!mounted) return;
     setState(() {

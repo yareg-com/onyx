@@ -610,20 +610,22 @@ class _FavoritesScreenState extends State<FavoritesScreen>
   }
 
   String? _messageKeyAtGlobal(Offset globalPosition) {
+    String? bestKey;
+    double bestCenterDist = double.infinity;
     for (final uniqueKey in _dragSelectionOrder) {
       final context = _messageItemKeys[uniqueKey]?.currentContext;
       if (context == null) continue;
       final box = context.findRenderObject() as RenderBox?;
       if (box == null || !box.hasSize) continue;
       final local = box.globalToLocal(globalPosition);
-      if (local.dx >= 0 &&
-          local.dy >= 0 &&
-          local.dx <= box.size.width &&
-          local.dy <= box.size.height) {
-        return uniqueKey;
+      if (local.dy < 0 || local.dy > box.size.height) continue;
+      final dist = (local.dy - box.size.height / 2).abs();
+      if (dist < bestCenterDist) {
+        bestCenterDist = dist;
+        bestKey = uniqueKey;
       }
     }
-    return null;
+    return bestKey;
   }
 
   void _updateDragAutoScroll() {
@@ -670,10 +672,13 @@ class _FavoritesScreenState extends State<FavoritesScreen>
     final newOffset =
         (_scroll.offset + speed).clamp(0.0, _scroll.position.maxScrollExtent);
     _scroll.jumpTo(newOffset);
-    final hoveredKey = _messageKeyAtGlobal(_lastDragPointerGlobal);
-    if (hoveredKey != null && hoveredKey != _dragSelectionCurrentKey) {
-      _selectMessageRangeTo(hoveredKey);
-    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_isDragSelectingMessages) return;
+      final hoveredKey = _messageKeyAtGlobal(_lastDragPointerGlobal);
+      if (hoveredKey != null && hoveredKey != _dragSelectionCurrentKey) {
+        _selectMessageRangeTo(hoveredKey);
+      }
+    });
   }
 
   void _stopDragAutoScroll() {
@@ -2313,6 +2318,12 @@ class _FavoritesScreenState extends State<FavoritesScreen>
                                 _suppressAutoRefocus = true;
                                 _focusNode.unfocus();
                               },
+                              onPointerUp: (_) {
+                                if (_isDragSelectingMessages) _endMessageDragSelection();
+                              },
+                              onPointerCancel: (_) {
+                                if (_isDragSelectingMessages) _endMessageDragSelection();
+                              },
                               child: ListView.builder(
                                   controller: _scroll,
                                   reverse: true,
@@ -2762,7 +2773,7 @@ class _FavoritesScreenState extends State<FavoritesScreen>
                                     Theme.of(context).colorScheme.surfaceContainerHighest,
                                     brightness,
                                   );
-                                  final isMobile = !Platform.isWindows && !Platform.isMacOS && !Platform.isLinux;
+                                  final isMobile = !Platform.isWindows && !Platform.isLinux;
                                   final useGlass = isMobile && SettingsManager.liquidGlassOnInput.value;
                                   final bar = ConstrainedBox(
                                     constraints: BoxConstraints(maxWidth: width),

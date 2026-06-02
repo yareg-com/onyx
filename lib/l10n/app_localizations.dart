@@ -1061,11 +1061,11 @@ class AppLocalizations {
       ? 'Изменения вступят в силу при следующем подключении к голосовому каналу.'
       : 'Changes take effect on the next voice channel join.';
 
-  // ── NearLink ──────────────────────────────────────────────────────────────
-  String get nearlinkReceive => _ru ? 'Получить с устройства' : 'Receive from device';
-  String get nearlinkReceiveSubtitle => _ru ? 'Покажите QR-код — отправитель его сканирует' : 'Show a QR code — the sender scans it';
-  String get nearlinkSend => _ru ? 'Отправить на устройство' : 'Send to device';
-  String get nearlinkSendSubtitle => _ru ? 'Сканируйте QR-код на устройстве получателя' : 'Scan the QR code shown on the receiver';
+  // ── WardLink ──────────────────────────────────────────────────────────────
+  String get wardlinkReceive => _ru ? 'Получить с устройства' : 'Receive from device';
+  String get wardlinkReceiveSubtitle => _ru ? 'Покажите QR-код — отправитель его сканирует' : 'Show a QR code — the sender scans it';
+  String get wardlinkSend => _ru ? 'Отправить на устройство' : 'Send to device';
+  String get wardlinkSendSubtitle => _ru ? 'Сканируйте QR-код на устройстве получателя' : 'Scan the QR code shown on the receiver';
 
   // ── Message context menu ──────────────────────────────────────────────────
   String get react => _ru ? 'Реакция' : 'React';
